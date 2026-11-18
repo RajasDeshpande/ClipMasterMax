@@ -1,0 +1,31 @@
+# ---- PRIVATE: everything the app creates while you use it ----
+# Imported videos, clips, exports, captions, settings, AI models, music,
+# and YouTube login files (OAuth client secret + token) all live in data/.
+data/
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.avi
+*.srt
+client_secret*.json
+youtube_*.json
+*token*.json
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- Tools / OS ----
+.claude/
+.vscode/
+.idea/
+node_modules/
+Thumbs.db
+.DS_Store
+*.log
+*.tmp
+demo-data/

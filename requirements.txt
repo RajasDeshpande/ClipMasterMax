@@ -1,0 +1,11 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+numpy>=1.26
+faster-whisper>=1.1
+yt-dlp[default]
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+# NVIDIA GPU speech-AI runtime (harmless on PCs without an NVIDIA GPU)
+nvidia-cublas-cu12; sys_platform != "darwin"
+nvidia-cudnn-cu12==9.*; sys_platform != "darwin"
