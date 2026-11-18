@@ -237,3 +237,11 @@ ol.steps li { margin: 4px 0; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
   .sys { display: none; }
 }
+
+/* ---------- cut tools ---------- */
+.cutbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; }
+.cutbox b { font-size: 13px; }
+.cutlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 150px; overflow: auto; }
+.cutrow { display: flex; align-items: center; gap: 6px; font-size: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; }
+.cutrow .dot { width: 8px; height: 8px; border-radius: 2px; background: repeating-linear-gradient(45deg, #ff4d5e 0 2px, rgba(255,77,94,.35) 2px 4px); }
+.word.cutw { text-decoration: line-through; text-decoration-color: #ff4d5e; opacity: .45; }

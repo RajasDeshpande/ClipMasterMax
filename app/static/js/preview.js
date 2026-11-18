@@ -238,10 +238,26 @@ export class Preview {
   }
   start() { if (!this.running) { this.running = true; requestAnimationFrame(this._raf); } }
   stop() { this.running = false; this._audioOff(); this._lastT = null; }
+  // clip time -> final video time (cut parts removed)
+  outTime(t) {
+    let o = t;
+    for (const c of this.clip?.cuts || []) o -= Math.max(0, Math.min(t, c.e) - c.s);
+    return Math.max(0, o);
+  }
+  outLen() { return this.outTime(this.clip.end - this.clip.start); }
   _raf() {
     if (!this.running) return;
     if (this.clip && !this.v.paused && this.v.currentTime >= this.clip.end - 0.02) {
       if (this.loop) this.v.currentTime = this.clip.start; else this.v.pause();
+    }
+    // jump over cut-out parts while playing, exactly like the final video
+    if (this.clip && !this.v.paused && !this.v.seeking) {
+      const t = this.v.currentTime - this.clip.start;
+      const cut = (this.clip.cuts || []).find(c => t >= c.s && t < c.e - 0.01);
+      if (cut) {
+        if (cut.e >= this.clip.end - this.clip.start - 0.02) { if (this.loop) this.v.currentTime = this.clip.start; else this.v.pause(); }
+        else this.v.currentTime = this.clip.start + cut.e;
+      }
     }
     this._audioTick();
     this.draw();
@@ -261,17 +277,18 @@ export class Preview {
     if (z !== 1) { ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2); }
     if (this.v.readyState >= 2) this.drawLayout(lay);
     ctx.setTransform(k, 0, 0, k, 0, 0);
+    const to = this.outTime(t), olen = this.outLen();
     if (eff.progress_bar) {
-      const len = this.clip.end - this.clip.start, bh = Math.max(6, Math.round(H * 0.006 / 2) * 2);
+      const bh = Math.max(6, Math.round(H * 0.006 / 2) * 2);
       ctx.fillStyle = eff.bar_color || "#FFE500";
-      ctx.fillRect(0, H - bh, W * Math.min(1, t / len), bh);
+      ctx.fillRect(0, H - bh, W * Math.min(1, to / olen), bh);
     }
     if (s.captions?.enabled !== false) this.drawCaptions(t);
-    this.drawHook(t); this.drawMark();
+    this.drawHook(to); this.drawMark();
     if (eff.fade) {
-      const len = this.clip.end - this.clip.start;
+      const len = olen, t2 = to;
       let a = 0;
-      if (t < 0.15) a = 1 - t / 0.15; else if (t > len - 0.3) a = (t - (len - 0.3)) / 0.3;
+      if (t2 < 0.15) a = 1 - t2 / 0.15; else if (t2 > len - 0.3) a = (t2 - (len - 0.3)) / 0.3;
       if (a > 0) { ctx.fillStyle = `rgba(0,0,0,${Math.min(1, a)})`; ctx.fillRect(0, 0, W, H); }
     }
     ctx.restore();

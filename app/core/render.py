@@ -73,8 +73,8 @@ def sfx_events(proj: dict, clip: dict, settings: dict, dur: float) -> list[tuple
         ev += [(a, style) for a, _ in captions.bleep_ranges(clip["words"], dur)]
     hype = eff.get("hype_sfx") or "none"
     if hype != "none":
-        ev += [(max(0.0, p - (0.05 if hype in ("boom", "horn") else 0.25)), hype)
-               for p in hype_points(proj.get("analysis"), clip["start"], clip["end"])]
+        pts = clip["_hype"] if "_hype" in clip else hype_points(proj.get("analysis"), clip["start"], clip["end"])
+        ev += [(max(0.0, p - (0.05 if hype in ("boom", "horn") else 0.25)), hype) for p in pts]
     for m in eff.get("sfx_marks") or []:
         try:
             t = float(m.get("t", -1))
@@ -98,6 +98,100 @@ def _zoom_expr(peaks: list[float], strength: float) -> str:
     return f"(1+{strength:.3f}*max(0,min(1,{'+'.join(terms)})))"
 
 
+# ------------------------------------------------------------------ cuts (removed parts inside a clip)
+def normalize_cuts(cuts, clip_len: float) -> list[dict]:
+    """Clamp, sort and merge cut ranges (clip-relative seconds)."""
+    rng = []
+    for c in cuts or []:
+        try:
+            a, b = float(c.get("s")), float(c.get("e"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        a, b = max(0.0, min(a, b)), min(clip_len, max(a, b))
+        if b - a >= 0.05:
+            rng.append([a, b])
+    rng.sort()
+    merged: list[list[float]] = []
+    for a, b in rng:
+        if merged and a <= merged[-1][1] + 0.02:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [{"s": round(a, 3), "e": round(b, 3)} for a, b in merged]
+
+
+def keep_segments(clip: dict) -> list[tuple[float, float]]:
+    clip_len = clip["end"] - clip["start"]
+    keep, cur = [], 0.0
+    for c in normalize_cuts(clip.get("cuts"), clip_len):
+        if c["s"] > cur + 0.01:
+            keep.append((cur, c["s"]))
+        cur = max(cur, c["e"])
+    if clip_len - cur > 0.01:
+        keep.append((cur, clip_len))
+    return keep or [(0.0, clip_len)]
+
+
+def to_out(t: float, keep: list[tuple[float, float]], snap: bool = False) -> float | None:
+    """Clip time -> final (stitched) time. None if t is inside a cut (or snapped to the next kept part)."""
+    acc = 0.0
+    for a, b in keep:
+        if t < a:
+            return acc if snap else None
+        if t <= b:
+            return acc + (t - a)
+        acc += b - a
+    return acc if snap else None
+
+
+def out_to_src(t_out: float, keep: list[tuple[float, float]]) -> float:
+    acc = 0.0
+    for a, b in keep:
+        if t_out <= acc + (b - a):
+            return a + max(0.0, t_out - acc)
+        acc += b - a
+    return keep[-1][1]
+
+
+def apply_cuts(proj: dict, clip: dict) -> tuple[dict, list[tuple[float, float]], float]:
+    """Return a copy of the clip whose words / sound marks / hype moments are on the final timeline."""
+    keep = keep_segments(clip)
+    out_len = round(sum(b - a for a, b in keep), 3)
+    c2 = dict(clip)
+    c2["_dur"] = out_len
+    a = proj.get("analysis")
+    punch = punch_peaks(a, clip["start"], clip["end"])
+    hype = hype_points(a, clip["start"], clip["end"])
+    if len(keep) == 1 and keep[0][0] == 0 and abs(keep[0][1] - (clip["end"] - clip["start"])) < 0.02:
+        c2["_punch"], c2["_hype"] = punch, hype
+        return c2, keep, out_len
+    words = []
+    for w in clip.get("words") or []:
+        s = to_out(w["s"], keep)
+        if s is None:
+            continue
+        seg_end = next((b for x, b in keep if x <= w["s"] <= b), w["e"])
+        e = to_out(min(w["e"], seg_end), keep) or s + 0.05
+        words.append({**w, "s": round(s, 3), "e": round(max(e, s + 0.04), 3)})
+    c2["words"] = words
+    c2["_punch"] = [round(x, 2) for x in (to_out(p, keep) for p in punch) if x is not None]
+    c2["_hype"] = [round(x, 2) for x in (to_out(p, keep) for p in hype) if x is not None]
+    st = dict(clip["settings"])
+    eff = dict(st.get("effects", {}))
+    marks = []
+    for m in eff.get("sfx_marks") or []:
+        try:
+            t = to_out(float(m.get("t")), keep)
+        except (TypeError, ValueError):
+            t = None
+        if t is not None:
+            marks.append({**m, "t": round(t, 3)})
+    eff["sfx_marks"] = marks
+    st["effects"] = eff
+    c2["settings"] = st
+    return c2, keep, out_len
+
+
 def _between_any(ranges: list[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in ranges) or "0"
 
@@ -105,7 +199,8 @@ def _between_any(ranges: list[tuple[float, float]]) -> str:
 def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: float, dur: float,
                 has_audio: bool, has_music: bool, ass_name: str | None, fonts_rel: str,
                 time_offset: float = 0.0, with_audio: bool = True,
-                sfx_inputs: dict[str, int] | None = None) -> tuple[str, str, str | None]:
+                sfx_inputs: dict[str, int] | None = None,
+                keep: list[tuple[float, float]] | None = None) -> tuple[str, str, str | None]:
     lay = settings["layout"]
     eff = settings["effects"]
     src = proj["source"]
@@ -118,8 +213,32 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
     fy = min(1.0, max(0.0, float(lay.get("fg_y", 0.5))))
     f: list[str] = []
 
-    head = f"[0:v]setpts=PTS-STARTPTS+{time_offset:.3f}/TB,fps={fps:g},setsar=1" if time_offset \
-        else f"[0:v]fps={fps:g},setsar=1"
+    # Cuts: keep only the chosen parts of the clip and stitch them back together.
+    vin, ain = "0:v", "0:a"
+    if keep and len(keep) > 1:
+        k = len(keep)
+        f.append("[0:v]split=" + str(k) + "".join(f"[vsg{i}]" for i in range(k)))
+        for i, (a, b) in enumerate(keep):
+            f.append(f"[vsg{i}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[vk{i}]")
+        f.append("".join(f"[vk{i}]" for i in range(k)) + f"concat=n={k}:v=1:a=0[vcat]")
+        vin = "vcat"
+        if with_audio and has_audio:
+            f.append("[0:a]asplit=" + str(k) + "".join(f"[asg{i}]" for i in range(k)))
+            for i, (a, b) in enumerate(keep):
+                f.append(f"[asg{i}]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,"
+                         f"afade=t=in:d=0.015,afade=t=out:st={max(0, b - a - 0.015):.3f}:d=0.015[ak{i}]")
+            f.append("".join(f"[ak{i}]" for i in range(k)) + f"concat=n={k}:v=0:a=1[acat]")
+            ain = "acat"
+    elif keep and len(keep) == 1 and keep[0][0] > 0.01:
+        a, b = keep[0]
+        f.append(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[vcat]")
+        vin = "vcat"
+        if with_audio and has_audio:
+            f.append(f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[acat]")
+            ain = "acat"
+
+    head = f"[{vin}]setpts=PTS-STARTPTS+{time_offset:.3f}/TB,fps={fps:g},setsar=1" if time_offset \
+        else f"[{vin}]fps={fps:g},setsar=1"
 
     if mode == "crop":
         # cover the frame, then crop with horizontal offset
@@ -157,7 +276,7 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
     last = "v0"
     # punch zoom on hype moments
     if eff.get("punch_zoom"):
-        peaks = punch_peaks(proj.get("analysis"), clip["start"], clip["end"])
+        peaks = clip["_punch"] if "_punch" in clip else punch_peaks(proj.get("analysis"), clip["start"], clip["end"])
         expr = _zoom_expr(peaks, float(eff.get("punch_strength", 0.1)))
         if expr != "1":
             f.append(f"[{last}]scale=w='max({W},trunc({W}*{expr}/2)*2)':h='max({H},trunc({H}*{expr}/2)*2)':eval=frame,"
@@ -183,7 +302,7 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
     a_out = None
     if with_audio:
         if has_audio:
-            f.append(f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a0]")
+            f.append(f"[{ain}]aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a0]")
         else:
             f.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur:.3f}[a0]")
         alast = "a0"
@@ -278,7 +397,7 @@ def _prepare(proj: dict, clip: dict, settings: dict, work: Path, *, override_hoo
     src = store.project_dir(proj["id"]) / proj["source"]["file"]
     if not src.exists():
         raise RuntimeError("The source video was deleted to free space. Import it again to render clips.")
-    dur = round(clip["end"] - clip["start"], 3)
+    dur = clip.get("_dur") or round(clip["end"] - clip["start"], 3)
     fps = _fps(settings, proj["source"]["fps"])
     s2 = dict(settings)
     if override_hook is not None:
@@ -297,6 +416,8 @@ def _prepare(proj: dict, clip: dict, settings: dict, work: Path, *, override_hoo
 
 
 def render_clip(proj: dict, clip: dict, *, on_progress: Callable[[float], None] | None = None) -> dict:
+    src_len = round(clip["end"] - clip["start"], 3)
+    clip, keep, _ = apply_cuts(proj, clip)          # everything below is on the final (stitched) timeline
     settings = clip["settings"]
     work = store.clip_dir(proj["id"], clip["id"])
     W, H, src, dur, fps, s2, fonts_rel, music_path = _prepare(proj, clip, settings, work)
@@ -307,7 +428,7 @@ def render_clip(proj: dict, clip: dict, *, on_progress: Callable[[float], None] 
     sfx_inputs = {n: first_sfx + i for i, n in enumerate(needed)}
     graph, vout, aout = build_graph(proj, clip, s2, W=W, H=H, fps=fps, dur=dur,
                                     has_audio=proj["source"]["has_audio"], has_music=music_path is not None,
-                                    ass_name="captions.ass", fonts_rel=fonts_rel, sfx_inputs=sfx_inputs)
+                                    ass_name="captions.ass", fonts_rel=fonts_rel, sfx_inputs=sfx_inputs, keep=keep)
     (work / "graph.txt").write_text(graph, encoding="utf-8")
 
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -317,7 +438,7 @@ def render_clip(proj: dict, clip: dict, *, on_progress: Callable[[float], None] 
     aspect_tag = settings["layout"].get("aspect", "9:16").replace(":", "x")
     out = out_dir / f"{base}_{aspect_tag}.mp4"
 
-    args = ["-ss", f"{clip['start']:.3f}", "-t", f"{dur:.3f}", "-i", str(src)]
+    args = ["-ss", f"{clip['start']:.3f}", "-t", f"{src_len:.3f}", "-i", str(src)]
     if music_path:
         args += ["-stream_loop", "-1", "-i", str(music_path)]
     for n in needed:
@@ -347,21 +468,29 @@ def render_clip(proj: dict, clip: dict, *, on_progress: Callable[[float], None] 
         srt_path.write_text(captions.to_srt(clip["words"], settings["style"], dur), encoding="utf-8")
     return {"file": str(out), "name": out.name, "srt": str(srt_path) if srt_path else None,
             "width": W, "height": H, "fps": fps, "duration": dur, "size": out.stat().st_size,
+            "cuts": len(keep) - 1 if len(keep) > 1 else 0, "source_duration": src_len,
             "seconds": round(time.time() - t0, 1), "rendered_at": time.time()}
 
 
 def render_frame(proj: dict, clip: dict, settings: dict, t: float, out: Path, *, width: int = 540,
                  override_hook: str | None = None, captions_on: bool | None = None) -> Path:
+    """t is clip-relative source time (what the editor's playhead shows)."""
+    clip = {**clip, "settings": settings}
+    keep = keep_segments(clip)
+    t_out = to_out(max(0.0, t), keep, snap=True) or 0.0
+    t_src = out_to_src(t_out, keep)               # if t was inside a cut, jump to the next kept frame
+    clip, _, _ = apply_cuts(proj, clip)
+    settings = clip["settings"]
     work = store.clip_dir(proj["id"], clip["id"])
     W, H, src, dur, fps, s2, fonts_rel, _ = _prepare(proj, clip, settings, work, override_hook=override_hook,
                                                      captions_on=captions_on)
-    t = max(0.0, min(dur - 0.05, t))
+    t_out = max(0.0, min(dur - 0.05, t_out))
     s3 = {**s2, "effects": {**s2["effects"], "fade": False}}
     graph, vout, _ = build_graph(proj, clip, s3, W=W, H=H, fps=fps, dur=dur, has_audio=False, has_music=False,
-                                 ass_name="captions.ass", fonts_rel=fonts_rel, time_offset=t, with_audio=False)
+                                 ass_name="captions.ass", fonts_rel=fonts_rel, time_offset=t_out, with_audio=False)
     graph = graph.replace("[vout]", "[vpre]") + f";\n[vpre]scale={width}:-2[vout]"
     (work / "graph_frame.txt").write_text(graph, encoding="utf-8")
-    args = [ffmpeg.FFMPEG, "-hide_banner", "-y", "-loglevel", "error", "-ss", f"{clip['start'] + t:.3f}",
+    args = [ffmpeg.FFMPEG, "-hide_banner", "-y", "-loglevel", "error", "-ss", f"{clip['start'] + t_src:.3f}",
             "-i", str(src), "-/filter_complex", "graph_frame.txt", "-map", f"[{vout}]", "-frames:v", "1",
             "-q:v", "3", str(out)]
     r = subprocess.run(args, cwd=str(work), capture_output=True, text=True, encoding="utf-8", errors="replace",

@@ -515,6 +515,17 @@ async function viewEditor(pid, cid) {
         <div class="box"><div class="lbl"><span>START</span><span><button class="btn xs" data-nudge="start,-0.1">−.1</button> <button class="btn xs" data-nudge="start,0.1">+.1</button> <button class="btn xs" data-set="start" title="Set to playhead">⤓</button></span></div><div class="v" id="tStart"></div></div>
         <div class="box"><div class="lbl"><span>END</span><span><button class="btn xs" data-nudge="end,-0.1">−.1</button> <button class="btn xs" data-nudge="end,0.1">+.1</button> <button class="btn xs" data-set="end" title="Set to playhead">⤓</button></span></div><div class="v" id="tEnd"></div></div>
       </div>
+      <div class="cutbox">
+        <div class="row"><b>✂ Cut out parts</b><span class="muted small grow" id="cutInfo" style="text-align:right"></span></div>
+        <div class="row wrap" style="gap:6px;margin-top:6px">
+          <button class="btn xs" id="cutIn" title="Start a cut at the playhead (key: [ )">[ Cut from here</button>
+          <button class="btn xs" id="cutOut" title="End the cut at the playhead (key: ] )">Cut to here ]</button>
+          <button class="btn xs" id="cutSil" title="Remove pauses where nobody talks (needs captions)">🤫 Remove silences</button>
+          <button class="btn xs" id="cutUndo" title="Undo last cut change">↶ Undo</button>
+        </div>
+        <div id="cutList" class="cutlist"></div>
+        <div class="muted small" style="margin-top:4px">Tip: <b>Shift + drag</b> on the bar above to cut a part. Cut parts are skipped in the preview and removed from the video.</div>
+      </div>
       <div class="row"><span class="tc grow" id="etc"></span><button class="btn sm" id="exact" title="Render one frame through the real export engine">🔍 Exact HD frame</button></div>
     </div>
     <div>
@@ -709,12 +720,24 @@ async function viewEditor(pid, cid) {
       const x = X(C.start + +m.t); sctx.fillStyle = SFX_COLOR[m.sound] || "#ff2e88";
       sctx.fillRect(x - 1, 8, 2, h - 24); sctx.beginPath(); sctx.arc(x, 9, 3.5, 0, Math.PI * 2); sctx.fill();
     });
+    // cut-out parts: red hatched blocks
+    (C.cuts || []).forEach(c => {
+      const x0 = X(C.start + c.s), x1 = X(C.start + c.e);
+      sctx.fillStyle = "rgba(255,77,94,.38)"; sctx.fillRect(x0, 0, x1 - x0, h);
+      sctx.save(); sctx.beginPath(); sctx.rect(x0, 0, x1 - x0, h); sctx.clip();
+      sctx.strokeStyle = "rgba(255,77,94,.85)"; sctx.lineWidth = 1.5;
+      for (let xx = x0 - h; xx < x1; xx += 7) { sctx.beginPath(); sctx.moveTo(xx, h); sctx.lineTo(xx + h, 0); sctx.stroke(); }
+      sctx.restore();
+    });
+    if (cutDrag) { const x0 = X(Math.min(cutDrag.a, cutDrag.b)), x1 = X(Math.max(cutDrag.a, cutDrag.b)); sctx.fillStyle = "rgba(255,77,94,.5)"; sctx.fillRect(x0, 0, x1 - x0, h); }
+    if (cutStart != null) { sctx.fillStyle = "#ffb020"; sctx.fillRect(X(C.start + cutStart) - 1.5, 0, 3, h); }
     sctx.fillStyle = "#c6ff3d"; [C.start, C.end].forEach(t => { sctx.fillRect(X(t) - 2, 0, 4, h); });
     sctx.fillStyle = "#fff"; sctx.fillRect(X(ev.currentTime) - 1, 0, 2, h);
   }
-  let sdrag = null;
+  let sdrag = null, cutDrag = null, cutStart = null;
   scrub.onmousedown = e => {
     const [a, b] = span(), w = scrub.clientWidth, x = e.clientX - scrub.getBoundingClientRect().left, t = a + x / w * (b - a);
+    if (e.shiftKey) { cutDrag = { a: Math.max(C.start, Math.min(C.end, t)), b: Math.max(C.start, Math.min(C.end, t)) }; sdrag = "cut"; return; }
     const near = (tt) => Math.abs((tt - a) / (b - a) * w - x) < 8;
     sdrag = near(C.start) ? "start" : near(C.end) ? "end" : "seek";
     if (sdrag === "seek") ev.currentTime = t;
@@ -722,16 +745,25 @@ async function viewEditor(pid, cid) {
   const sMove = e => {
     if (!sdrag) return;
     const [a, b] = span(), t = a + (e.clientX - scrub.getBoundingClientRect().left) / scrub.clientWidth * (b - a);
+    if (sdrag === "cut") { cutDrag.b = Math.max(C.start, Math.min(C.end, t)); drawScrub(); return; }
     if (sdrag === "seek") ev.currentTime = Math.max(0, t);
     else { C[sdrag] = Math.max(0, Math.min(P.source.duration, t)); if (C.end - C.start < 1) C[sdrag] = sdrag === "start" ? C.end - 1 : C.start + 1; updTrim(); ev.currentTime = C[sdrag]; }
   };
-  const sUp = () => { if (sdrag && sdrag !== "seek") saveTrim(); sdrag = null; };
+  const sUp = () => {
+    if (sdrag === "cut" && cutDrag) {
+      const s = Math.min(cutDrag.a, cutDrag.b) - C.start, e2 = Math.max(cutDrag.a, cutDrag.b) - C.start;
+      cutDrag = null;
+      if (e2 - s >= 0.1) addCut(s, e2); else drawScrub();
+    } else if (sdrag && sdrag !== "seek") saveTrim();
+    sdrag = null;
+  };
   window.addEventListener("mousemove", sMove); window.addEventListener("mouseup", sUp);
   S.cleanup.push(() => { window.removeEventListener("mousemove", sMove); window.removeEventListener("mouseup", sUp); });
 
   let lastWi = -2;
   pv.onTime = (t) => {
-    $("#etc").textContent = `${fmt(Math.max(0, t))} / ${fmt(C.end - C.start)}`;
+    const outT = Math.max(0, t) - (C.cuts || []).reduce((a, c) => a + Math.max(0, Math.min(t, c.e) - c.s), 0);
+    $("#etc").textContent = `${fmt(Math.max(0, outT))} / ${fmt(finalLen())}${(C.cuts || []).length ? " (after cuts)" : ""}`;
     drawScrub();
     let wi = -1;
     for (let i = 0; i < words.length && words[i].s <= t; i++) if (t < words[i].e + 0.3) wi = i;
@@ -742,14 +774,95 @@ async function viewEditor(pid, cid) {
     }
   };
 
-  function updTrim() { $("#tStart").textContent = fmt(C.start, 2); $("#tEnd").textContent = `${fmt(C.end, 2)}  (${(C.end - C.start).toFixed(1)}s)`; drawScrub(); }
+  const cutTotal = () => (C.cuts || []).reduce((a, c) => a + (c.e - c.s), 0);
+  const finalLen = () => Math.max(0, (C.end - C.start) - cutTotal());
+  function updTrim() {
+    $("#tStart").textContent = fmt(C.start, 2);
+    $("#tEnd").textContent = `${fmt(C.end, 2)}  (${finalLen().toFixed(1)}s)`;
+    renderCuts(); drawScrub();
+  }
   async function saveTrim() {
     try {
       const r = await api("PATCH", `/api/projects/${pid}/clips/${cid}`, { start: C.start, end: C.end });
-      Object.assign(C, { start: r.start, end: r.end, words: r.words, punch: r.punch, hype: r.hype }); words = clone(r.words || []);
+      Object.assign(C, { start: r.start, end: r.end, words: r.words, punch: r.punch, hype: r.hype, cuts: r.cuts || [] }); words = clone(r.words || []);
+      st.effects.sfx_marks = r.settings?.effects?.sfx_marks ?? st.effects.sfx_marks;
       pv.set(C, st, words, P.source); renderWords(); updTrim(); renderMarks(); updSfxInfo();
     } catch (e) { fail(e); }
   }
+
+  // ------------------------------------------------ cuts (remove parts inside the clip)
+  C.cuts = C.cuts || [];
+  const cutHistory = [];
+  function mergeCuts(list) {
+    const len = C.end - C.start;
+    const r = list.map(c => ({ s: Math.max(0, Math.min(c.s, c.e)), e: Math.min(len, Math.max(c.s, c.e)) }))
+      .filter(c => c.e - c.s >= 0.05).sort((a, b) => a.s - b.s);
+    const out = [];
+    for (const c of r) { if (out.length && c.s <= out.at(-1).e + 0.02) out.at(-1).e = Math.max(out.at(-1).e, c.e); else out.push({ ...c }); }
+    return out.map(c => ({ s: +c.s.toFixed(3), e: +c.e.toFixed(3) }));
+  }
+  const saveCuts = debounce(async () => {
+    try { const r = await api("PATCH", `/api/projects/${pid}/clips/${cid}`, { cuts: C.cuts }); C.cuts = r.cuts || []; updTrim(); }
+    catch (e) { fail(e); }
+  }, 350);
+  function setCuts(list, msg) {
+    const next = mergeCuts(list);
+    if ((C.end - C.start) - next.reduce((a, c) => a + c.e - c.s, 0) < 1) return toast("Keep at least 1 second of the clip", true);
+    cutHistory.push(clone(C.cuts)); if (cutHistory.length > 40) cutHistory.shift();
+    C.cuts = next; pv.set(C, st, words, P.source); updTrim(); renderWords(); saveCuts();
+    if (msg) toast(msg);
+  }
+  function addCut(s, e) { setCuts([...C.cuts, { s, e }], `✂ Cut ${(e - s).toFixed(1)}s — final length ${Math.max(0, finalLen() - (e - s)).toFixed(1)}s`); }
+  function renderCuts() {
+    const n = (C.cuts || []).length;
+    $("#cutInfo").textContent = n ? `${n} cut${n > 1 ? "s" : ""} · −${cutTotal().toFixed(1)}s · final ${finalLen().toFixed(1)}s` : `final ${finalLen().toFixed(1)}s`;
+    $("#cutList").innerHTML = (C.cuts || []).map((c, i) => `
+      <div class="cutrow"><span class="dot"></span><span class="mono">${fmt(c.s, 1)} → ${fmt(c.e, 1)}</span><span class="muted">(${(c.e - c.s).toFixed(1)}s)</span>
+      <span class="grow"></span><button class="btn xs" data-cutplay="${i}" title="Play around this cut">▶</button><button class="btn xs" data-cutdel="${i}" title="Put this part back">↺ Restore</button></div>`).join("");
+    $("#cutUndo").disabled = !cutHistory.length;
+    $("#cutOut").disabled = cutStart == null;
+    $("#cutIn").classList.toggle("primary", cutStart != null);
+  }
+  $("#cutIn").onclick = () => {
+    const t = ev.currentTime - C.start;
+    if (t < 0 || t > C.end - C.start) return toast("Move the playhead inside the clip first", true);
+    cutStart = t; renderCuts(); drawScrub(); toast("Cut start set — move to where the cut should end and press “Cut to here ]”");
+  };
+  $("#cutOut").onclick = () => {
+    if (cutStart == null) return;
+    const t = Math.max(0, Math.min(C.end - C.start, ev.currentTime - C.start));
+    const s = Math.min(cutStart, t), e = Math.max(cutStart, t);
+    cutStart = null;
+    if (e - s < 0.1) { renderCuts(); drawScrub(); return toast("Cut is too short — move the playhead further", true); }
+    addCut(s, e);
+  };
+  $("#cutUndo").onclick = () => {
+    if (!cutHistory.length) return;
+    C.cuts = cutHistory.pop(); pv.set(C, st, words, P.source); updTrim(); renderWords(); saveCuts(); toast("Undone");
+  };
+  $("#cutSil").onclick = () => {
+    if (!words.length) return toast("Generate captions first — silences are found from the speech", true);
+    const len = C.end - C.start, pad = 0.18, minGap = 0.7, gaps = [];
+    const ws = [...words].filter(w => w.s >= 0 && w.s < len).sort((a, b) => a.s - b.s);
+    if (ws.length && ws[0].s > minGap) gaps.push({ s: 0, e: ws[0].s - pad });
+    for (let i = 0; i + 1 < ws.length; i++) { const g0 = ws[i].e, g1 = ws[i + 1].s; if (g1 - g0 > minGap) gaps.push({ s: g0 + pad, e: g1 - pad }); }
+    if (ws.length && len - ws.at(-1).e > minGap) gaps.push({ s: ws.at(-1).e + pad, e: len });
+    if (!gaps.length) return toast("No long silences found 👌");
+    const removed = gaps.reduce((a, g) => a + g.e - g.s, 0);
+    setCuts([...C.cuts, ...gaps], `🤫 Removed ${gaps.length} silence${gaps.length > 1 ? "s" : ""} (−${removed.toFixed(1)}s). Use ↶ Undo if you want them back.`);
+  };
+  $("#cutList").onclick = e => {
+    const d = e.target.dataset;
+    if (d.cutdel != null) { const list = clone(C.cuts); list.splice(+d.cutdel, 1); setCuts(list, "Part restored"); }
+    if (d.cutplay != null) { const c = C.cuts[+d.cutplay]; ev.currentTime = C.start + Math.max(0, c.s - 2); unlockAudio(); ev.play(); }
+  };
+  const onCutKey = e => {
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+    if (e.key === "[") $("#cutIn").click();
+    if (e.key === "]") $("#cutOut").click();
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && cutHistory.length) { e.preventDefault(); $("#cutUndo").click(); }
+  };
+  window.addEventListener("keydown", onCutKey); S.cleanup.push(() => window.removeEventListener("keydown", onCutKey));
   $$("[data-nudge]").forEach(b => b.onclick = () => { const [k, d] = b.dataset.nudge.split(","); C[k] = Math.max(0, Math.min(P.source.duration, C[k] + +d)); updTrim(); ev.currentTime = C[k]; saveTrim(); });
   $$("[data-set]").forEach(b => b.onclick = () => { const k = b.dataset.set; C[k] = ev.currentTime; if (C.end - C.start < 1) return toast("Clip must be at least 1s", true); updTrim(); saveTrim(); });
   updTrim();
@@ -900,7 +1013,8 @@ async function viewEditor(pid, cid) {
     chunks.forEach(ch => {
       ch.forEach(w => {
         const wi = words.indexOf(w);
-        html += `<span class="word ${w.p != null && w.p < 0.55 ? "low" : ""} ${wi === selWord ? "sel" : ""}" data-i="${wi}" title="${w.s.toFixed(2)}s → ${w.e.toFixed(2)}s · confidence ${Math.round((w.p ?? 1) * 100)}%">${esc(w.w)}</span>`;
+        const inCut = (C.cuts || []).some(c => w.s >= c.s && w.s < c.e);
+        html += `<span class="word ${w.p != null && w.p < 0.55 ? "low" : ""} ${wi === selWord ? "sel" : ""} ${inCut ? "cutw" : ""}" data-i="${wi}" title="${inCut ? "✂ Cut out — not in the video · " : ""}${w.s.toFixed(2)}s → ${w.e.toFixed(2)}s · confidence ${Math.round((w.p ?? 1) * 100)}%">${esc(w.w)}</span>`;
         i++;
       });
       html += `<span class="chunkbreak"></span>`;
@@ -976,7 +1090,7 @@ async function viewEditor(pid, cid) {
   $("#exact").onclick = async () => {
     const b = $("#exact"); b.disabled = true; b.innerHTML = '<span class="spin"></span>';
     try {
-      const r = await api("POST", `/api/projects/${pid}/clips/${cid}/frame`, { t: Math.max(0, ev.currentTime - C.start), settings: st, words, width: 720 }, true);
+      const r = await api("POST", `/api/projects/${pid}/clips/${cid}/frame`, { t: Math.max(0, ev.currentTime - C.start), settings: st, words, cuts: C.cuts || [], width: 720 }, true);
       const url = URL.createObjectURL(await r.blob());
       modal(`<h3>Exact export frame @ ${fmt(ev.currentTime - C.start, 2)}</h3><p class="muted small">Rendered by the real export engine.</p><img src="${url}">`);
     } catch (e) { fail(e); } finally { b.disabled = false; b.textContent = "🔍 Exact HD frame"; }
@@ -994,7 +1108,7 @@ async function viewEditor(pid, cid) {
         ${r.srt ? `<a class="btn sm" href="/api/projects/${pid}/clips/${cid}/srt">⬇ Captions .srt</a>` : ""}
         <button class="btn sm" id="openF">📁 Show in folder</button>
         <button class="btn sm danger" id="delOut" title="Delete this rendered file from your PC to free space (you can re-render any time)">🗑 Delete file</button>
-        <span class="muted small grow" style="text-align:right">${r.width}×${r.height} · ${r.fps}fps · ${(r.size / 1048576).toFixed(1)} MB · ${r.seconds}s render</span>
+        <span class="muted small grow" style="text-align:right">${r.width}×${r.height} · ${r.fps}fps · ${(+r.duration).toFixed(1)}s${r.cuts ? ` (${r.cuts + 1} parts stitched)` : ""} · ${(r.size / 1048576).toFixed(1)} MB · ${r.seconds}s render</span>
       </div>`;
     $("#openF").onclick = () => api("POST", "/api/open-folder", { path: r.file }).catch(fail);
     $("#delOut").onclick = async () => {

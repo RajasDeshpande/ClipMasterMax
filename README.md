@@ -21,6 +21,7 @@ Built for GTA 6. Works for any game: GTA 5, Valorant, BGMI, Free Fire, CoD, Fort
 | 🔥 | **Finds the hype moments for you** | Scans the audio for gunfire, explosions, crashes and screaming, scores every moment, and suggests ready-made clips from 15 s up to 3 min. |
 | 🎯 | **Captions synced to every word** | Whisper large-v3 runs on your NVIDIA GPU and timestamps each word, so the active word lights up exactly when it's spoken. |
 | 🇮🇳 | **English, हिंदी, Hinglish** | Write Hindi speech in Devanagari, in Roman letters ("bhai ye kya ho gaya"), or translated to English. |
+| ✂ | **Cut out parts of a clip** | Remove boring bits anywhere inside a clip and keep the rest stitched together. **🤫 Remove silences** makes jump cuts in one click. Captions, sound effects and zooms stay in sync. |
 | 🎨 | **10 caption styles** | Beast, Viral Green, Clean, Neon, Comic, Karaoke, One-Word, Fire, Desi (Hindi), Subtitle. You can change the font, colours, size, position, animation, glow and box. |
 | 📱 | **Every format** | 9:16 Shorts/Reels/TikTok, 1:1, 4:5, 16:9. Framing options: **blur fill**, **crop**, **fit**, or **facecam on top + gameplay below**. |
 | 💥 | **Retention effects** | Punch-zoom on hype moments, a big **hook title** in the first seconds, a progress bar and your watermark. |
@@ -109,6 +110,19 @@ Open a clip with **✏️ Edit** and pick the spoken language (Auto / English / 
 The hook title shows up big in the first seconds; this is the #1 trick for Shorts retention:
 
 ![Hook title](docs/screenshots/04-hook-title.png)
+
+### Step 3½: Trim & cut out parts
+
+- **Trim the ends:** drag the green handles on the bar under the preview, or use **−.1 / +.1 / ⤓ (set to playhead)** under *START* and *END*.
+- **Cut out the middle:** remove a boring part anywhere inside the clip.
+  - Press **[ Cut from here**, move the playhead, then press **Cut to here ]**. The keys <kbd>[</kbd> and <kbd>]</kbd> do the same.
+  - Or **Shift + drag** across the bar.
+- **🤫 Remove silences:** one click cuts out every pause where nobody talks, giving fast jump cuts (needs captions first).
+- **What you see:** cut parts show red on the bar and their words are crossed out in the transcript. The preview skips cut parts while it plays, and *END* shows the final length.
+- **Changed your mind?** Press **↺ Restore** on any cut in the list, or **↶ Undo** (<kbd>Ctrl</kbd>+<kbd>Z</kbd>).
+- **On export:** the kept parts are stitched together, and captions, bleeps, sound effects and punch-zooms all move to the right moments.
+
+![Cut out parts](docs/screenshots/16-cut-parts.png)
 
 ### Step 4: Style the captions
 

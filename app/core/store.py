@@ -163,6 +163,7 @@ def add_clip(pid: str, start: float, end: float, title: str = "", score: float |
         "reasons": reasons or [],
         "peak": peak,
         "words": None,
+        "cuts": [],
         "language": None,
         "settings": copy.deepcopy(settings),
         "render": None,

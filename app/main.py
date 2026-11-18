@@ -263,14 +263,25 @@ def patch_clip(pid: str, cid: str, body: dict = Body(...)):
             en = min(dur, float(body.get("end", c["end"])))
             if en - st < 1:
                 raise HTTPException(400, "Clip must be at least 1 second")
-            if c.get("words") and abs(st - old_start) > 1e-6:
-                shift = old_start - st
+            shift = old_start - st
+            if c.get("words") and abs(shift) > 1e-6:
                 c["words"] = [{**w, "s": round(w["s"] + shift, 3), "e": round(w["e"] + shift, 3)}
                               for w in c["words"] if 0 <= w["s"] + shift and w["e"] + shift <= en - st + 0.5]
+            if abs(shift) > 1e-6:
+                # keep cuts and sound marks glued to the same moments of the video
+                c["cuts"] = [{"s": x["s"] + shift, "e": x["e"] + shift} for x in c.get("cuts") or []]
+                eff = c["settings"].get("effects", {})
+                eff["sfx_marks"] = [{**m, "t": round(m["t"] + shift, 3)} for m in eff.get("sfx_marks") or []
+                                    if 0 <= m["t"] + shift < en - st]
             c["start"], c["end"] = round(st, 3), round(en, 3)
+            c["cuts"] = render.normalize_cuts(c.get("cuts"), c["end"] - c["start"])
         for k in ("title", "words", "meta"):
             if k in body:
                 c[k] = body[k]
+        if "cuts" in body:
+            c["cuts"] = render.normalize_cuts(body["cuts"], c["end"] - c["start"])
+            if sum(b - a for a, b in render.keep_segments(c)) < 1:
+                raise HTTPException(400, "Can't cut everything — keep at least 1 second")
         if "settings" in body and isinstance(body["settings"], dict):
             c["settings"] = store.deep_merge(c["settings"], body["settings"])
     pp = store.update_project(pid, fn)
@@ -394,6 +405,8 @@ def preview_frame(pid: str, cid: str, body: dict = Body(default={})):
     settings = store.deep_merge(c["settings"], body.get("settings") or {})
     if body.get("words") is not None:
         c = {**c, "words": body["words"]}
+    if body.get("cuts") is not None:
+        c = {**c, "cuts": render.normalize_cuts(body["cuts"], c["end"] - c["start"])}
     out = store.clip_dir(pid, cid) / f"frame_{int(time.time() * 1000)}.jpg"
     for old in out.parent.glob("frame_*.jpg"):
         try:
@@ -444,7 +457,8 @@ def clip_srt(pid: str, cid: str):
         return FileResponse(r["srt"], filename=Path(r["srt"]).name)
     if not c.get("words"):
         raise HTTPException(404, "No captions")
-    txt = captions.to_srt(c["words"], c["settings"]["style"], c["end"] - c["start"])
+    c2, _, out_len = render.apply_cuts(_proj(pid), c)
+    txt = captions.to_srt(c2["words"], c["settings"]["style"], out_len)
     return Response(txt, media_type="text/plain", headers={"Content-Disposition": f'attachment; filename="{cid}.srt"'})
 
 
