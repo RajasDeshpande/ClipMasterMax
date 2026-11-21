@@ -6,6 +6,9 @@ faster-whisper>=1.1
 yt-dlp[default]
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
+requests>=2.31
+rapidocr>=3.0
+onnxruntime>=1.17
 # NVIDIA GPU speech-AI runtime (harmless on PCs without an NVIDIA GPU)
 nvidia-cublas-cu12; sys_platform != "darwin"
 nvidia-cudnn-cu12==9.*; sys_platform != "darwin"

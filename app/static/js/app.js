@@ -45,6 +45,13 @@ $("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.ta
 
 // ============================================================ global state
 const S = { sys: null, presets: null, settings: null, view: null, cleanup: [] };
+// Listen on the page container, and stop listening when the user navigates away
+// (otherwise handlers from a previously opened clip keep firing and edit the wrong clip).
+function onView(type, fn) {
+  const v = $("#view");
+  v.addEventListener(type, fn);
+  S.cleanup.push(() => v.removeEventListener(type, fn));
+}
 
 // ============================================================ jobs
 const Jobs = {
@@ -101,8 +108,20 @@ async function loadSys() {
   $("#sys").innerHTML = `
     <span class="chip ${S.sys.cuda ? "ok" : "no"}" title="Speech AI device">${S.sys.cuda ? "⚡ GPU AI" : "CPU AI"} · ${esc(S.sys.whisper_default)}</span>
     <span class="chip ${S.sys.nvenc ? "ok" : "no"}" title="Video encoder">${S.sys.nvenc ? "⚡ NVENC export" : "CPU export"}</span>
-    <span class="chip ${y.connected ? "ok" : ""}" title="YouTube upload">${y.connected ? "▶ " + esc(y.channel?.title || "YouTube") : "YouTube not linked"}</span>`;
+    <span class="chip ${y.connected ? "ok" : ""}" title="YouTube upload">${y.connected ? "▶ " + esc(y.channel?.title || "YouTube") : "YouTube not linked"}</span>
+    <span class="chip" id="igChip" title="Instagram Reels">📸 …</span>`;
+  api("GET", "/api/instagram/status").then(ig => {
+    const c = $("#igChip"); if (!c) return;
+    c.className = "chip" + (ig.connected ? " ok" : ""); c.textContent = ig.connected ? "📸 @" + (ig.username || "Instagram") : "Instagram not linked";
+  }).catch(() => {});
 }
+async function updReviewBadge() {
+  try {
+    const n = (await api("GET", "/api/posts")).filter(p => p.status === "review").length;
+    const b = $("#reviewCount"); b.textContent = n; b.classList.toggle("hidden", !n);
+  } catch {}
+}
+setInterval(updReviewBadge, 10000); setTimeout(updReviewBadge, 1500);
 $("#btnSettings").onclick = () => openSettings();
 $("#btnStorage").onclick = () => openStorage();
 
@@ -156,9 +175,208 @@ async function openStorage() {
   };
 }
 
+// ============================================================ caption choice (shared by Make / Auto-make / Auto Pilot)
+const CAP_LANGS = [["en", "English"], ["hinglish", "Hinglish (bhai kya hua)"], ["hi", "हिंदी (Devanagari)"], ["hi2en", "Hindi → English"], ["auto", "Auto-detect"]];
+const CAP_LANG_MAP = { en: ["en", "devanagari"], hi: ["hi", "devanagari"], hinglish: ["hi", "hinglish"], hi2en: ["hi", "english"], auto: ["auto", "devanagari"] };
+function capPrefs() {
+  try { return { preset: "beast", lang: "en", ...(JSON.parse(localStorage.getItem("cm_cap") || "{}")) }; }
+  catch { return { preset: "beast", lang: "en" }; }
+}
+function saveCapPrefs(p) { try { localStorage.setItem("cm_cap", JSON.stringify(p)); } catch {} }
+function capPatch(preset, lang) {
+  const out = {};
+  const pr = S.presets?.captions?.[preset];
+  if (pr) out.style = clone(pr.style);
+  const m = CAP_LANG_MAP[lang];
+  if (m) out.captions = { language: m[0], hindi_mode: m[1], enabled: true };
+  return out;
+}
+function capChoiceHTML(id) {
+  const cp = capPrefs();
+  return `<div class="row wrap" style="gap:8px">
+    <select class="input" id="${id}Style" style="flex:1;min-width:150px" title="Caption style">${Object.entries(S.presets?.captions || {}).map(([k, p]) => `<option value="${k}" ${k === cp.preset ? "selected" : ""}>🎨 ${esc(p.label)}</option>`).join("")}</select>
+    <select class="input" id="${id}Lang" style="flex:1;min-width:150px" title="Caption language">${CAP_LANGS.map(([k, l]) => `<option value="${k}" ${k === cp.lang ? "selected" : ""}>🗣 ${esc(l)}</option>`).join("")}</select>
+  </div>`;
+}
+function bindCapChoice(id) {
+  const upd = () => saveCapPrefs({ preset: $(`#${id}Style`).value, lang: $(`#${id}Lang`).value });
+  $(`#${id}Style`).onchange = upd; $(`#${id}Lang`).onchange = upd;
+}
+
+// ============================================================ AUTO PILOT
+async function openAutopilot(P, onDone) {
+  const [yt, ig] = await Promise.all([api("GET", "/api/youtube/status").catch(() => ({})), api("GET", "/api/instagram/status").catch(() => ({}))]);
+  const now = new Date(Date.now() + 15 * 60000); now.setSeconds(0, 0);
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const m = modal(`
+    <h2>🤖 Auto Pilot</h2>
+    <p class="muted small">Finds the best moments, captions them, adds game pop-ups, renders, writes titles &amp; hashtags, and posts. Sit back 😎</p>
+    <div class="grid2">
+      <div><label class="f">How many clips</label><select class="input" id="apCount">${[3, 5, 8, 10].map(n => `<option ${n === 5 ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+      <div><label class="f">Clip length</label><select class="input" id="apLen">${[[15, "15s"], [20, "20s"], [30, "30s"], [45, "45s"], [59, "59s"], [90, "90s"]].map(([s, l]) => `<option value="${s}" ${s === 30 ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+    </div>
+    <label class="f">Captions</label>${capChoiceHTML("ap")}
+    <label class="switch" style="margin-top:6px"><span>💥 Game text pop-ups<div class="muted small">Reads the game screen (WASTED, MISSION PASSED, VICTORY…) and pops it up big</div></span><input type="checkbox" id="apGame" checked></label>
+    <label class="switch"><span>📈 Progress bar + punch zoom</span><input type="checkbox" id="apFx" checked></label>
+    <div class="sep"></div>
+    <h3>Post to</h3>
+    <label class="switch"><span>▶ YouTube Shorts ${yt.connected ? `<span class="muted small">(${esc(yt.channel?.title || "connected")})</span>` : '<span class="muted small">— not connected</span>'}</span><input type="checkbox" id="apYT" ${yt.connected ? "checked" : "disabled"}></label>
+    <label class="switch"><span>📸 Instagram Reels ${ig.connected ? `<span class="muted small">(@${esc(ig.username || "")})</span>` : '<span class="muted small">— not connected</span>'}</span><input type="checkbox" id="apIG" ${ig.connected ? "checked" : "disabled"}></label>
+    ${!yt.connected || !ig.connected ? `<p class="small"><a href="#" id="apSettings">Connect accounts in Settings →</a> (you can also just make the clips now and post later)</p>` : ""}
+    <label class="switch"><span>👀 Let me review before anything is posted<div class="muted small">Recommended. Approve each post in 📤 Posts. Turn off for fully hands-free.</div></span><input type="checkbox" id="apReview" checked></label>
+    <div class="grid2">
+      <div><label class="f">When</label><select class="input" id="apWhen"><option value="now">As soon as ready</option><option value="spread">Spread out (1 at a time)</option></select></div>
+      <div id="apSpread" class="hidden"><label class="f">Every</label><select class="input" id="apEvery">${[1, 2, 3, 4, 6, 8, 12, 24].map(h => `<option value="${h}" ${h === 4 ? "selected" : ""}>${h} hour${h > 1 ? "s" : ""}</option>`).join("")}</select></div>
+    </div>
+    <div id="apStartBox" class="hidden"><label class="f">First post at</label><input class="input" type="datetime-local" id="apStart" value="${local}"></div>
+    <div class="row" style="margin-top:16px"><button class="btn primary big grow" id="apGo">🚀 Start Auto Pilot</button></div>`);
+  bindCapChoice("ap");
+  $("#apSettings", m)?.addEventListener("click", e => { e.preventDefault(); closeModal(); openSettings(); });
+  $("#apWhen", m).onchange = e => { const s = e.target.value === "spread"; $("#apSpread", m).classList.toggle("hidden", !s); $("#apStartBox", m).classList.toggle("hidden", !s); };
+  $("#apGo", m).onclick = async () => {
+    const cp = capPrefs(), platforms = [];
+    if ($("#apYT", m).checked) platforms.push("youtube");
+    if ($("#apIG", m).checked) platforms.push("instagram");
+    const spread = $("#apWhen", m).value === "spread";
+    const body = {
+      count: +$("#apCount", m).value, length: +$("#apLen", m).value, preset: cp.preset, language: cp.lang,
+      game_text: $("#apGame", m).checked, platforms, review: $("#apReview", m).checked, privacy: "public",
+      every_hours: spread ? +$("#apEvery", m).value : 0,
+      start_at: spread ? Math.floor(new Date($("#apStart", m).value).getTime() / 1000) : 0,
+      effects: $("#apFx", m).checked ? { progress_bar: true, punch_zoom: true } : {},
+    };
+    try {
+      const j = await api("POST", `/api/projects/${P.id}/autopilot`, body);
+      closeModal();
+      toast("🤖 Auto Pilot started — you can keep working");
+      Jobs.add(j, jj => {
+        onDone?.();
+        if (jj.status === "done") {
+          const r = jj.result;
+          toast(r.posts.length ? (r.review ? `✅ ${r.clips.length} clips ready — review them in 📤 Posts` : `✅ ${r.clips.length} clips made, posting now`) : `✅ ${r.clips.length} clips made`);
+          if (r.posts.length) location.hash = "#/posts";
+        }
+      });
+    } catch (e) { fail(e); }
+  };
+}
+
+// ============================================================ POSTS (review queue + history)
+const PLAT = { youtube: { icon: "▶", name: "YouTube", cls: "yt" }, instagram: { icon: "📸", name: "Instagram", cls: "ig" } };
+const toLocalInput = (sec) => { const d = new Date(sec * 1000); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+async function viewPosts() {
+  const v = $("#view");
+  v.innerHTML = `<div class="phead"><a class="btn sm ghost" href="#/">← Projects</a><h2 class="grow">📤 Posts</h2>
+    <span class="muted small" id="postAcc"></span></div><div id="postsBox"><div class="empty">Loading…</div></div>`;
+  const acc = await Promise.all([api("GET", "/api/youtube/status").catch(() => ({})), api("GET", "/api/instagram/status").catch(() => ({}))]);
+  $("#postAcc").innerHTML = `${acc[0].connected ? `<span class="chip ok">▶ ${esc(acc[0].channel?.title || "YouTube")}</span>` : '<span class="chip">▶ YouTube not connected</span>'}
+    ${acc[1].connected ? `<span class="chip ok">📸 @${esc(acc[1].username || "")}${acc[1].quota_total ? ` · ${acc[1].quota_used ?? 0}/${acc[1].quota_total} today` : ""}</span>` : '<span class="chip">📸 Instagram not connected</span>'}
+    <button class="btn xs" id="postSet">⚙ Accounts</button>`;
+  $("#postSet").onclick = () => openSettings();
+  const render = async () => {
+    let posts;
+    try { posts = await api("GET", "/api/posts"); } catch (e) { return fail(e); }
+    if (!$("#postsBox")) return;  // navigated away meanwhile
+    const groups = [
+      ["review", "👀 Waiting for your OK", posts.filter(p => p.status === "review")],
+      ["upcoming", "⏳ Queued & scheduled", posts.filter(p => ["queued", "scheduled", "posting"].includes(p.status))],
+      ["failed", "⚠️ Failed", posts.filter(p => p.status === "failed")],
+      ["posted", "✅ Posted", posts.filter(p => p.status === "posted")],
+    ];
+    if (!posts.length) {
+      $("#postsBox").innerHTML = `<div class="empty">Nothing here yet.<br>Open a project and press <b>🤖 Auto Pilot</b>, or post a rendered clip from its <b>🚀 Export</b> tab.</div>`;
+      return;
+    }
+    $("#postsBox").innerHTML = groups.filter(g => g[2].length).map(([k, title, list]) => `
+      <h3 style="margin:18px 0 8px">${title} <span class="muted small">(${list.length})</span></h3>
+      <div class="posts">${list.map(p => postCard(p)).join("")}</div>`).join("");
+  };
+  function postCard(p) {
+    const pl = PLAT[p.platform];
+    const editable = ["review", "failed", "queued", "scheduled"].includes(p.status);
+    const when = p.when ? new Date(p.when * 1000).toLocaleString() : "as soon as approved";
+    const body = p.platform === "instagram"
+      ? `<label class="f">Reel caption</label><textarea class="input" data-f="caption" rows="5" ${editable ? "" : "disabled"}>${esc(p.caption)}</textarea>`
+      : `<label class="f">Title <span class="muted">${(p.title || "").length}/100</span></label><input class="input" data-f="title" maxlength="100" value="${esc(p.title)}" ${editable ? "" : "disabled"}>
+         <details><summary class="muted small" style="cursor:pointer;margin-top:6px">Description &amp; tags</summary>
+         <textarea class="input" data-f="description" rows="4" ${editable ? "" : "disabled"}>${esc(p.description)}</textarea>
+         <input class="input" data-f="tags" style="margin-top:6px" value="${esc((p.tags || []).join(", "))}" ${editable ? "" : "disabled"}></details>`;
+    return `<div class="post card" data-id="${p.id}">
+      <div class="pthumb" style="background-image:url('/api/projects/${p.project}/clips/${p.clip}/thumb')"><span class="plat ${pl.cls}">${pl.icon} ${pl.name}</span></div>
+      <div class="pbody">
+        <div class="row"><b class="grow" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.clip_title)}</b>
+          <span class="muted small">${esc(p.project_name || "")}</span></div>
+        ${body}
+        <div class="row wrap" style="margin-top:10px;gap:6px">
+          ${p.status === "posted" ? `<a class="btn sm primary" target="_blank" href="${esc(p.result?.url || "#")}">Open ↗</a>
+              ${p.result?.studio ? `<a class="btn sm" target="_blank" href="${esc(p.result.studio)}">YouTube Studio ↗</a>` : ""}
+              <span class="muted small">${p.result?.publish_at ? "goes public " + new Date(p.result.publish_at).toLocaleString() : (p.result?.privacy ? "· " + esc(p.result.privacy) : "")}</span>`
+            : p.status === "posting" ? `<span class="spin"></span><span class="muted small">Posting…</span>`
+            : `<button class="btn sm pink" data-act="now">🚀 ${p.status === "failed" ? "Retry now" : "Post now"}</button>
+               <input class="input" type="datetime-local" data-f="when" style="width:auto" value="${p.when ? toLocalInput(p.when) : ""}" title="Schedule">
+               <button class="btn sm" data-act="schedule">🗓 Schedule</button>
+               ${p.rendered ? `<a class="btn sm" target="_blank" href="/api/projects/${p.project}/clips/${p.clip}/output">▶ Watch</a>` : ""}
+               <a class="btn sm" href="#/p/${p.project}/c/${p.clip}">✏️ Edit clip</a>
+               <span class="grow"></span><button class="btn sm danger" data-act="del">✕</button>`}
+        </div>
+        ${p.status === "scheduled" ? `<div class="muted small" style="margin-top:6px">🗓 ${esc(when)}${p.platform === "instagram" ? " — keep ClipMasterMax running at that time" : " — YouTube publishes it even if your PC is off"}</div>` : ""}
+        ${p.status === "queued" ? `<div class="muted small" style="margin-top:6px">⏳ In the queue…</div>` : ""}
+        ${p.error ? `<div class="note warn" style="margin-top:8px">${esc(p.error)}</div>` : ""}
+      </div></div>`;
+  }
+  const box = $("#postsBox");
+  let alive = true;
+  S.cleanup.push(() => { alive = false; });
+  // one pending save per post+field (so quick edits to different fields/cards are all kept)
+  const pending = new Map();
+  const queueSave = (id, f, val) => {
+    const key = id + "|" + f, old = pending.get(key);
+    if (old) clearTimeout(old.timer);
+    const entry = { id, patch: { [f]: val } };
+    entry.timer = setTimeout(() => flush(key), 500);
+    pending.set(key, entry);
+  };
+  async function flush(key) {
+    const e = pending.get(key); if (!e) return;
+    clearTimeout(e.timer); pending.delete(key);
+    try { await api("PATCH", `/api/posts/${e.id}`, e.patch); } catch (er) { fail(er); }
+  }
+  const flushPost = (id) => Promise.all([...pending.keys()].filter(k => k.startsWith(id + "|")).map(flush));
+  box.oninput = e => {
+    const card = e.target.closest(".post"), f = e.target.dataset.f;
+    if (!card || !f || f === "when") return;
+    const val = f === "tags" ? e.target.value.split(",").map(s => s.trim()).filter(Boolean) : e.target.value;
+    queueSave(card.dataset.id, f, val);
+  };
+  box.onclick = async e => {
+    const b = e.target.closest("[data-act]"); if (!b || b.disabled) return;
+    const card = b.closest(".post"), id = card.dataset.id;
+    const btns = $$("[data-act]", card);
+    btns.forEach(x => x.disabled = true);
+    try {
+      await flushPost(id);  // never post old text
+      if (b.dataset.act === "del") { if (!confirm("Remove this post from the queue? (The video file stays.)")) return; await api("DELETE", `/api/posts/${id}`); }
+      if (b.dataset.act === "now") { await api("POST", `/api/posts/${id}/approve`, { now: true }); toast("Posting… 🚀"); }
+      if (b.dataset.act === "schedule") {
+        const v2 = $('[data-f="when"]', card).value; if (!v2) return toast("Pick a date & time first", true);
+        const when = Math.floor(new Date(v2).getTime() / 1000);
+        if (when < Date.now() / 1000 + 60) return toast("Pick a time in the future", true);
+        await api("POST", `/api/posts/${id}/approve`, { when }); toast("Scheduled 🗓");
+      }
+      await render();
+    } catch (er) { fail(er); }
+    finally { btns.forEach(x => { if (x.isConnected) x.disabled = false; }); }
+  };
+  await render();
+  if (!alive) return;   // user already left the page
+  const iv = setInterval(() => { if (alive && document.body.contains(box) && !pending.size && !box.querySelector("input:focus, textarea:focus")) render(); }, 5000);
+  S.cleanup.push(() => clearInterval(iv));
+}
+
 function route() {
   S.cleanup.forEach(f => f()); S.cleanup = [];
   const h = location.hash.replace(/^#\/?/, "").split("/");
+  if (h[0] === "posts") return viewPosts();
   if (h[0] === "p" && h[1] && h[2] === "c" && h[3]) return viewEditor(h[1], h[3]);
   if (h[0] === "p" && h[1]) return viewProject(h[1]);
   return viewHome();
@@ -210,7 +428,8 @@ async function viewHome() {
       Jobs.add(r.job); location.hash = `#/p/${r.project.id}`;
     } catch (e) { fail(e); }
   };
-  $("#url").onkeydown = e => e.key === "Enter" && $("#go").click();
+  // NB: must not return false — an on* handler returning false blocks the key (that broke Ctrl+V / typing)
+  $("#url").onkeydown = e => { if (e.key === "Enter") $("#go").click(); };
   $("#openExports").onclick = () => api("POST", "/api/open-folder", {}).catch(fail);
 
   function upload(f) {
@@ -325,6 +544,10 @@ async function viewProject(pid) {
           <button class="btn sm" id="deep" title="Transcribes the whole video so highlights also use what was said (bro, no way, bhai…). Makes captions instant afterwards.">🧠 ${P.has_transcript ? "Speech scanned ✓" : "Deep scan speech"}</button>
           <span class="muted small grow">${P.has_transcript ? "Highlights use voice reactions too." : "Optional: smarter picks using voice reactions."}</span>
         </div>
+        <div class="sep" style="margin:12px 0"></div>
+        <div class="small muted" style="font-weight:700;margin-bottom:6px">💬 Captions for ⚡ Make &amp; Auto-make</div>
+        ${capChoiceHTML("pc")}
+        <button class="btn pink full" id="autoPilot" style="margin-top:12px">🤖 Auto Pilot: clip, caption, render &amp; post</button>
       </div>
       <div class="row" style="margin-bottom:8px">
         <label class="row small muted"><input type="checkbox" class="ck" id="ckAll"> Select all</label>
@@ -448,9 +671,12 @@ async function viewProject(pid) {
   };
   $("#ckAll").onchange = e => { P.clips.forEach(c => e.target.checked ? checked.add(c.id) : checked.delete(c.id)); renderClips(); };
   $("#makeSel").onclick = () => makeClips([...checked]);
+  bindCapChoice("pc");
+  $("#autoPilot").onclick = () => openAutopilot(P, () => reload());
   async function makeClips(ids) {
     try {
-      const r = await api("POST", `/api/projects/${pid}/batch`, { clips: ids, captions: true });
+      const cp = capPrefs();
+      const r = await api("POST", `/api/projects/${pid}/batch`, { clips: ids, captions: true, settings: capPatch(cp.preset, cp.lang) });
       r.jobs.forEach(j => Jobs.add(j, jj => { if (jj.status === "done" && jj.kind === "render") reload(); }));
       toast(`Making ${ids.length} clip${ids.length > 1 ? "s" : ""}… you can keep working`);
     } catch (e) { fail(e); }
@@ -537,7 +763,7 @@ async function viewEditor(pid, cid) {
       <section class="pane on" data-pane="cap"><div class="card">
         <div class="row"><h3 class="grow">AI captions</h3>${F.sw("captions.enabled", "Show captions")}</div>
         <div class="grid2">
-          <div><label class="f">Spoken language</label>${F.seg("captions.language", [["auto", "Auto"], ["en", "English"], ["hi", "Hindi"]])}</div>
+          <div><label class="f">Spoken language</label>${F.seg("captions.language", [["en", "English"], ["hi", "Hindi"], ["auto", "Auto-detect"]])}</div>
           <div><label class="f">Hindi captions as</label>${F.seg("captions.hindi_mode", [["devanagari", "हिंदी"], ["hinglish", "Hinglish"], ["english", "English"]])}</div>
         </div>
         <div class="grid2">
@@ -615,6 +841,17 @@ async function viewEditor(pid, cid) {
         ${F.text("effects.hook_text", "Hook text", "e.g. GTA 6 cops are BROKEN 💀 / ये क्या हो गया 😱")}
         <div class="grid3"><div>${F.range("effects.hook_duration", "Show for", 0, 10, 0.5, "s")}</div><div>${F.range("effects.hook_position", "Position", 0.05, 0.9, 0.01, "%")}</div>
           <div class="colors" style="margin-top:28px">${F.color("effects.hook_color", "Text")}${F.color("effects.hook_bg", "Box")}</div></div>
+        <div class="sep"></div>
+        <div class="row"><h3 class="grow">💬 Text pop-ups</h3><button class="btn sm primary" id="popScan" title="Reads the game's screen (WASTED, MISSION PASSED, VICTORY, BOOYAH…) and adds pop-ups automatically. Works offline.">🔍 Find game moments</button></div>
+        <p class="muted small" style="margin:2px 0 8px">Big text that pops on screen for a moment — “WASTED 💀”, “NO WAY 😱”, “+5 STARS 🚨”. Add your own at the playhead, or let the app read the game screen.</p>
+        <div class="row wrap" style="gap:6px">
+          <input class="input grow" id="popText" placeholder="Type pop-up text, e.g. BRO WHAT 😭" maxlength="40" style="min-width:180px">
+          <input type="color" id="popColor" value="#FFE500" title="Text colour">
+          <select class="input" id="popDur" style="width:auto" title="How long it stays">${[1, 1.5, 2, 3].map(s => `<option value="${s}" ${s === 1.5 ? "selected" : ""}>${s}s</option>`).join("")}</select>
+          <button class="btn sm" id="popAdd">＋ Add at playhead</button>
+        </div>
+        <div class="row wrap" style="gap:5px;margin-top:6px">${["WASTED 💀", "NO WAY 😱", "BRO WHAT 😭", "LET'S GO 🔥", "EZ 😎", "RIP 💀", "OOPS 🤡", "CLUTCH 🧊"].map(t => `<button class="btn xs" data-popq="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+        <div id="popList" class="cutlist" style="max-height:200px"></div>
         <div class="sep"></div>
         <h3>Motion &amp; branding</h3>
         ${F.sw("effects.punch_zoom", "💥 Punch zoom on hype moments", "Auto zoom-in on explosions, gunshots, screams")}
@@ -715,6 +952,11 @@ async function viewEditor(pid, cid) {
       sctx.fillStyle = "rgba(46,230,255,.9)";
       (C.hype || C.punch || []).forEach(p => { const x = X(C.start + p); sctx.beginPath(); sctx.moveTo(x - 4, 0); sctx.lineTo(x + 4, 0); sctx.lineTo(x, 6); sctx.fill(); });
     }
+    // text pop-ups: little rounded tags at the bottom
+    (eff.text_pops || []).forEach(p => {
+      const x = X(C.start + +p.t); sctx.fillStyle = p.color || "#FFE500";
+      sctx.fillRect(x - 1, h - 20, 2, 14); sctx.fillRect(x - 4, h - 22, 8, 5);
+    });
     // soundboard markers
     (eff.sfx_marks || []).forEach(m => {
       const x = X(C.start + +m.t); sctx.fillStyle = SFX_COLOR[m.sound] || "#ff2e88";
@@ -903,14 +1145,14 @@ async function viewEditor(pid, cid) {
     if (k.startsWith("style.") && k !== "style.preset") st.style.preset = "custom";
     syncForm(); pv.set(C, st, words, P.source); saveSettings(); if (k.startsWith("style.max")) renderWords();
   }
-  v.addEventListener("input", e => {
+  onView("input", e => {
     const el = e.target, k = el.dataset.k; if (!k) return;
     let val = el.type === "checkbox" ? el.checked : (el.type === "range" || el.type === "number") ? +el.value : el.value;
     if (k === "effects.music" && val === "") val = null;
     setPath(st, k, val); changed(k);
     if (k === "effects.hype_sfx" && val !== "none") pv.playSfx(val);
   });
-  v.addEventListener("click", e => {
+  onView("click", e => {
     const p = e.target.closest("[data-sfx-play]"); if (p) { pv.playSfx(p.dataset.sfxPlay); return; }
     const b = e.target.closest("[data-seg] button[data-val]"); if (!b) return;
     const k = b.closest("[data-seg]").dataset.seg; setPath(st, k, b.dataset.val); changed(k);
@@ -1000,6 +1242,57 @@ async function viewEditor(pid, cid) {
     if (d.mclear != null && confirm("Remove all placed sounds from this clip?")) { st.effects.sfx_marks = []; changed("effects.sfx_marks"); renderMarks(); }
   };
   renderMarks();
+
+  // ------------------------------------------------ text pop-ups
+  if (!Array.isArray(st.effects.text_pops)) st.effects.text_pops = [];
+  function renderPops() {
+    const box = $("#popList"), ps = st.effects.text_pops, len = C.end - C.start;
+    if (!ps.length) { box.innerHTML = `<div class="muted small" style="margin-top:6px">No pop-ups yet.</div>`; drawScrub(); return; }
+    box.innerHTML = ps.map((p, i) => `<div class="cutrow">
+      <span style="width:10px;height:10px;border-radius:3px;background:${esc(p.color || "#FFE500")}"></span>
+      <span class="mono">${fmt(p.t, 2)}</span><b class="grow" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.text)}</b>
+      ${p.source === "game" ? '<span class="chip" style="padding:0 6px">🎮 game</span>' : ""}${p.t >= len ? '<span class="muted small">(after end)</span>' : ""}
+      <button class="btn xs" data-pjump="${i}">Jump</button><button class="btn xs danger" data-pdel="${i}">✕</button></div>`).join("");
+    drawScrub();
+  }
+  function addPop(text) {
+    text = (text || "").trim(); if (!text) return toast("Type some text first", true);
+    const len = C.end - C.start, rel = ev.currentTime - C.start;
+    if (rel < -0.05 || rel > len + 0.05) return toast("Move the playhead inside the clip first", true);
+    const t = Math.floor(Math.max(0, Math.min(len - 0.2, rel)) * 100) / 100;
+    st.effects.text_pops = [...st.effects.text_pops, { t, text, dur: +$("#popDur").value, color: $("#popColor").value.toUpperCase() }]
+      .sort((a, b) => a.t - b.t);
+    changed("effects.text_pops"); renderPops(); pv.draw();
+    toast(`💬 “${text}” added at ${fmt(t, 2)}`);
+  }
+  $("#popAdd").onclick = () => { addPop($("#popText").value); $("#popText").value = ""; };
+  $("#popText").onkeydown = e => { if (e.key === "Enter") $("#popAdd").click(); };
+  onView("click", e => { const q = e.target.closest("[data-popq]"); if (q) addPop(q.dataset.popq); });
+  $("#popList").onclick = e => {
+    const d = e.target.closest("button")?.dataset; if (!d) return;
+    if (d.pjump != null) { const p = st.effects.text_pops[+d.pjump]; if (p) { ev.currentTime = C.start + +p.t; pv.draw(); } }
+    if (d.pdel != null) { st.effects.text_pops.splice(+d.pdel, 1); changed("effects.text_pops"); renderPops(); pv.draw(); }
+  };
+  $("#popScan").onclick = async () => {
+    const b = $("#popScan"); b.disabled = true; b.innerHTML = '<span class="spin"></span> Reading the game…';
+    await api("PATCH", `/api/projects/${pid}/clips/${cid}`, { settings: st }).catch(() => {});
+    try {
+      const j = await api("POST", `/api/projects/${pid}/clips/${cid}/gametext`);
+      Jobs.add(j, async jj => {
+        if (!document.body.contains(b)) return;          // user moved to another clip/page meanwhile
+        b.disabled = false; b.textContent = "🔍 Find game moments";
+        if (jj.status !== "done") return;
+        // keep the pop-ups the user added meanwhile; replace only the game-detected ones
+        const found = (jj.result.found || []).map(f => ({ ...f }));
+        st.effects.text_pops = [...st.effects.text_pops.filter(p => p.source !== "game"), ...found].sort((a, b2) => a.t - b2.t);
+        changed("effects.text_pops");
+        pv.set(C, st, words, P.source); renderPops();
+        const n = jj.result.found.length;
+        toast(n ? `🎮 Found ${n} game moment${n > 1 ? "s" : ""}: ${jj.result.found.map(f => f.text).join(", ")}` : "No game banners found in this clip (try adding your own pop-ups)");
+      });
+    } catch (e) { fail(e); b.disabled = false; b.textContent = "🔍 Find game moments"; }
+  };
+  renderPops();
 
   // ------------------------------------------------ transcript editor
   function renderWords() {
@@ -1142,8 +1435,15 @@ async function viewEditor(pid, cid) {
       <label class="f">Title <span class="muted" id="tLen"></span></label><input class="input" id="mTitle" maxlength="100" value="${esc(META.title)}">
       <label class="f">Description</label><textarea class="input" id="mDesc" rows="7">${esc(META.description)}</textarea>
       <label class="f">Tags (comma separated)</label><input class="input" id="mTags" value="${esc(META.tags.join(", "))}">
-      <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-copy="mTitle">📋 Copy title</button><button class="btn sm" data-copy="mDesc">📋 Copy description</button><button class="btn sm" data-copy="mTags">📋 Copy tags</button></div>`;
-    const upd = () => { META.title = $("#mTitle").value; META.description = $("#mDesc").value; META.tags = $("#mTags").value.split(",").map(s => s.trim()).filter(Boolean); $("#tLen").textContent = `${META.title.length}/100`; saveMeta(); };
+      <label class="f">📸 Instagram Reel caption <span class="muted" id="igLen"></span></label><textarea class="input" id="mIG" rows="6">${esc(META.ig_caption || "")}</textarea>
+      <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-copy="mTitle">📋 Copy title</button><button class="btn sm" data-copy="mDesc">📋 Copy description</button><button class="btn sm" data-copy="mTags">📋 Copy tags</button><button class="btn sm" data-copy="mIG">📋 Copy Reel caption</button></div>`;
+    const upd = () => {
+      META.title = $("#mTitle").value; META.description = $("#mDesc").value; META.ig_caption = $("#mIG").value;
+      META.tags = $("#mTags").value.split(",").map(s => s.trim()).filter(Boolean);
+      $("#tLen").textContent = `${META.title.length}/100`;
+      $("#igLen").textContent = `${META.ig_caption.length}/2200 · ${(META.ig_caption.match(/#\w+/g) || []).length} hashtags`;
+      saveMeta();
+    };
     $("#metaBox").oninput = upd; upd();
     $("#metaBox").onclick = e => {
       if (e.target.dataset.t) { $("#mTitle").value = e.target.dataset.t; upd(); }
@@ -1169,33 +1469,39 @@ async function viewEditor(pid, cid) {
 
   async function renderYT() {
     const card = $("#ytCard");
-    const y = await api("GET", "/api/youtube/status").catch(() => ({}));
-    if (!y.connected) {
-      card.innerHTML = `<h3>▶ Upload to YouTube</h3><p class="muted small">Connect your channel once and upload straight from here (scheduled or private first). You can also just download the MP4 and post it to YouTube, Instagram Reels or TikTok yourself.</p>
-        <button class="btn" id="ytSet">Connect YouTube…</button>`;
+    const [y, ig] = await Promise.all([api("GET", "/api/youtube/status").catch(() => ({})), api("GET", "/api/instagram/status").catch(() => ({}))]);
+    const posted = C.posts || {};
+    if (!posted.youtube && C.upload) posted.youtube = C.upload;
+    const done = Object.entries(posted).map(([k, r]) => `<div class="note" style="margin:6px 0">${PLAT[k]?.icon || ""} Posted to ${PLAT[k]?.name || k} ✓ <a target="_blank" href="${esc(r.url)}">${esc(r.url)}</a></div>`).join("");
+    if (!y.connected && !ig.connected) {
+      card.innerHTML = `<h3>📤 Post to YouTube &amp; Instagram</h3>${done}<p class="muted small">Connect your accounts once (Settings) to post straight from here or let Auto Pilot do it. You can always download the MP4 and post it yourself.</p>
+        <button class="btn" id="ytSet">Connect accounts…</button>`;
       $("#ytSet").onclick = () => openSettings();
       return;
     }
-    const up = C.upload;
-    card.innerHTML = `<div class="row"><h3 class="grow">▶ Upload to ${esc(y.channel?.title || "YouTube")}</h3>${up ? `<a class="btn sm" target="_blank" href="${up.studio}">Open in Studio ↗</a>` : ""}</div>
-      ${up ? `<div class="note" style="margin:8px 0">Uploaded ✓ <a target="_blank" href="${up.url}">${up.url}</a> (${esc(up.privacy)}${up.publish_at ? ", scheduled " + esc(up.publish_at) : ""})</div>` : ""}
+    card.innerHTML = `<div class="row"><h3 class="grow">📤 Post this clip</h3><a class="btn sm" href="#/posts">Open 📤 Posts</a></div>${done}
+      <label class="switch"><span>▶ YouTube Shorts ${y.connected ? `<span class="muted small">(${esc(y.channel?.title || "")})</span>` : '<span class="muted small">— not connected</span>'}</span><input type="checkbox" id="pYT" ${y.connected ? "checked" : "disabled"}></label>
+      <label class="switch"><span>📸 Instagram Reel ${ig.connected ? `<span class="muted small">(@${esc(ig.username || "")})</span>` : '<span class="muted small">— not connected</span>'}</span><input type="checkbox" id="pIG" ${ig.connected ? "checked" : "disabled"}></label>
       <div class="grid2">
-        <div><label class="f">Visibility</label><select class="input" id="ytPriv"><option value="private">Private (check first)</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></div>
-        <div><label class="f">Schedule (optional)</label><input class="input" type="datetime-local" id="ytWhen"></div>
+        <div><label class="f">YouTube visibility</label><select class="input" id="ytPriv"><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="private">Private</option></select></div>
+        <div><label class="f">When</label><input class="input" type="datetime-local" id="ytWhen" title="Leave empty to post right away"></div>
       </div>
-      <label class="switch"><span>Use generated thumbnail <span class="muted small">(long videos, verified channels)</span></span><input type="checkbox" id="ytThumb"></label>
-      <p class="muted small">Uses the title, description and tags above (click ✨ Suggest first). Category: Gaming. Not made for kids.</p>
-      <button class="btn pink" id="ytGo" ${C.render ? "" : "disabled"}>⬆ Upload to YouTube</button> ${C.render ? "" : '<span class="muted small">Render first</span>'}`;
+      <p class="muted small">Uses the title, description, tags and Reel caption above (✨ Suggest fills them). Leave “When” empty to post right away.</p>
+      <button class="btn pink" id="ytGo" ${C.render ? "" : "disabled"}>🚀 Post</button> ${C.render ? "" : '<span class="muted small">Render first</span>'}`;
     $("#ytGo").onclick = async () => {
       if (!META) { const m = await api("POST", `/api/projects/${pid}/clips/${cid}/metadata`); META = m; renderMeta(); }
-      const when = $("#ytWhen").value; const priv = $("#ytPriv").value;
-      if (!confirm(`Upload "${META.title}" to your channel as ${when ? "scheduled for " + when : priv}?`)) return;
+      const platforms = [];
+      if ($("#pYT").checked) platforms.push("youtube");
+      if ($("#pIG").checked) platforms.push("instagram");
+      if (!platforms.length) return toast("Tick YouTube and/or Instagram", true);
+      const whenStr = $("#ytWhen").value, when = whenStr ? Math.floor(new Date(whenStr).getTime() / 1000) : null;
+      if (when && when < Date.now() / 1000 + 60) return toast("Pick a time in the future (or leave it empty)", true);
+      const names = platforms.map(p => PLAT[p].name).join(" + ");
+      if (!confirm(`Post "${META.title}" to ${names} ${when ? "on " + new Date(when * 1000).toLocaleString() : "now"}?`)) return;
       try {
-        const j = await api("POST", `/api/projects/${pid}/clips/${cid}/upload`, {
-          title: META.title, description: META.description, tags: META.tags, privacy: priv,
-          publish_at: when ? new Date(when).toISOString() : null, use_thumbnail: $("#ytThumb").checked,
-        });
-        Jobs.add(j, jj => { if (jj.status === "done") { C.upload = jj.result; renderYT(); toast("Uploaded to YouTube ✅"); } });
+        await api("POST", "/api/posts", { project: pid, clip: cid, platforms, title: META.title, description: META.description,
+          tags: META.tags, caption: META.ig_caption || META.title, privacy: $("#ytPriv").value, when, review: false });
+        toast(when ? "Scheduled 🗓 — see 📤 Posts" : "Posting… 🚀 — progress in 📤 Posts");
       } catch (e) { fail(e); }
     };
   }
@@ -1206,7 +1512,7 @@ async function viewEditor(pid, cid) {
 
 // ============================================================ SETTINGS
 async function openSettings() {
-  const y = await api("GET", "/api/youtube/status").catch(() => ({}));
+  const [y, ig] = await Promise.all([api("GET", "/api/youtube/status").catch(() => ({})), api("GET", "/api/instagram/status").catch(() => ({}))]);
   const sys = S.sys || {};
   const m = modal(`
     <h2>Settings</h2>
@@ -1225,12 +1531,42 @@ async function openSettings() {
       <div class="row wrap"><button class="btn sm" id="ytJson">${y.client_secret ? "✓ Client JSON added — replace" : "⬆ Upload client JSON"}</button>
       <input type="file" id="ytJsonF" accept=".json" hidden>
       <button class="btn sm primary" id="ytCon" ${y.client_secret ? "" : "disabled"}>Connect &amp; log in</button></div>`}
+    <details style="margin-top:8px"><summary class="small" style="cursor:pointer">💡 YouTube tips: stay logged in &amp; post publicly</summary>
+      <ul class="steps small">
+        <li><b>Stay logged in:</b> in Google Cloud → OAuth consent screen, click <b>Publish app</b> (“In production”). In “Testing” mode Google logs you out every 7 days. You’ll see an “unverified app” warning for your own app — that's fine, click Advanced → Continue.</li>
+        <li><b>Public posts:</b> Google keeps videos uploaded by new personal API projects <b>private</b> until the project passes YouTube's free <a href="https://support.google.com/youtube/contact/yt_api_form" target="_blank">API audit</a>. Until then, auto-posts arrive as private — make them public in YouTube Studio with one click.</li>
+        <li><b>Daily limit:</b> about 6 uploads a day on the free quota. You can request more in Google Cloud.</li>
+      </ul></details>
+    <div class="sep"></div>
+    <h3>📸 Instagram Reels</h3>
+    ${ig.connected ? `<div class="note">Connected to <b>@${esc(ig.username || "")}</b> (${esc((ig.account_type || "").toLowerCase() || "professional")})${ig.quota_total ? ` · ${ig.quota_used ?? 0}/${ig.quota_total} posts used in the last 24h` : ""}.</div>
+      ${ig.warning ? `<div class="note warn" style="margin-top:6px">${esc(ig.warning)}</div>` : ""}
+      <div class="row" style="margin-top:10px"><button class="btn sm danger" id="igDis">Disconnect</button></div>` : `
+      <p class="muted small">One-time setup (≈10 min, free). Meta requires a Professional account and your own app:</p>
+      <ol class="steps small">
+        <li>In the Instagram app: Settings → <b>Account type and tools</b> → switch to a <b>Creator</b> (or Business) account.</li>
+        <li>Open <a href="https://developers.facebook.com/apps/" target="_blank">Meta for Developers</a> → <b>Create app</b> → use case <b>“Manage messaging &amp; content on Instagram”</b>.</li>
+        <li>In the app: <b>Instagram → API setup with Instagram login</b> → <b>Add account</b> and log in with your Instagram (accept the tester invite if asked: Instagram → Settings → Website permissions → Apps and websites).</li>
+        <li>Click <b>Generate token</b> next to your account and copy it.</li>
+        <li>Paste it below and click Connect. ClipMasterMax refreshes it automatically (it lasts 60 days).</li>
+      </ol>
+      <div class="row"><input class="input grow" id="igTok" placeholder="Paste your Instagram access token (IGAA…)" type="password" autocomplete="off"><button class="btn sm primary" id="igCon">Connect</button></div>
+      <p class="muted small">The token stays on this PC only (data folder). Limit: ~50 Reels a day. Scheduled Reels post from this app, so keep it running at the scheduled time.</p>`}
     <div class="sep"></div>
     <h3>💻 System</h3>
     <p class="small muted">FFmpeg ${esc(sys.ffmpeg)} · Video export: ${sys.nvenc ? "NVIDIA NVENC (fast)" : "CPU"} · Speech AI: ${sys.cuda ? "GPU (CUDA)" : "CPU"} · default model <b>${esc(sys.whisper_default)}</b> · yt-dlp ${sys.ytdlp ? "✓" : "missing"}</p>
     <p class="small muted">Data folder: <span class="mono">${esc(sys.data_dir)}</span></p>
     <button class="btn sm" id="openExp">📁 Open exports folder</button>`);
   $("#openExp", m).onclick = () => api("POST", "/api/open-folder", {}).catch(fail);
+  if (ig.connected) {
+    $("#igDis", m).onclick = async () => { if (!confirm("Disconnect Instagram?")) return; await api("POST", "/api/instagram/disconnect"); openSettings(); };
+  } else {
+    $("#igCon", m).onclick = async () => {
+      const b = $("#igCon", m); b.disabled = true; b.innerHTML = '<span class="spin"></span>';
+      try { const r = await api("POST", "/api/instagram/connect", { token: $("#igTok", m).value }); toast(`Instagram connected: @${r.username} ✅`); openSettings(); loadSys(); }
+      catch (er) { fail(er); b.disabled = false; b.textContent = "Connect"; }
+    };
+  }
   if (y.connected) {
     $("#ytDis", m).onclick = async () => { await api("POST", "/api/youtube/disconnect"); closeModal(); loadSys(); };
   } else {

@@ -82,5 +82,16 @@ def suggest(proj: dict, clip: dict) -> dict:
             break
         tag_out.append(t)
         total += len(t) + 1
+    # Instagram Reel caption: short hook, call to action, a handful of focused hashtags
+    ig_tags = list(dict.fromkeys(game["hashtags"][:3] + (["#reels", "#gamingreels"] if vertical else ["#gaming"])))[:5]
+    ig_hook = (titles[0].replace("#shorts", "").replace("#Shorts", "").strip()) if titles else hook_cap
+    ig_caption = "\n".join([
+        ig_hook,
+        "",
+        ("Follow for daily " + gname + " clips 🎮🔥") if lang != "hi" else (gname + " के daily clips के लिए Follow करो 🎮🔥"),
+        "💬 Comment what you'd do next 👇" if lang != "hi" else "💬 Comment में बताओ 👇",
+        "",
+        " ".join(ig_tags),
+    ])
     return {"titles": titles, "title": titles[0], "description": "\n".join(desc_lines), "tags": tag_out,
-            "hashtags": hashtags, "hook": hook_cap}
+            "hashtags": hashtags, "hook": hook_cap, "ig_caption": ig_caption[:2150]}

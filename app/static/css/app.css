@@ -245,3 +245,14 @@ ol.steps li { margin: 4px 0; }
 .cutrow { display: flex; align-items: center; gap: 6px; font-size: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; }
 .cutrow .dot { width: 8px; height: 8px; border-radius: 2px; background: repeating-linear-gradient(45deg, #ff4d5e 0 2px, rgba(255,77,94,.35) 2px 4px); }
 .word.cutw { text-decoration: line-through; text-decoration-color: #ff4d5e; opacity: .45; }
+
+/* ---------- posts ---------- */
+.posts { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; }
+.post { display: grid; grid-template-columns: 120px 1fr; gap: 14px; padding: 12px; }
+.post .pthumb { width: 120px; aspect-ratio: 9/16; border-radius: 10px; background: #000 center/cover; position: relative; }
+.post .plat { position: absolute; left: 6px; top: 6px; font: 800 11px "UI Poppins", sans-serif; padding: 2px 7px; border-radius: 7px; color: #fff; }
+.post .plat.yt { background: #ff0033; }
+.post .plat.ig { background: linear-gradient(45deg, #f58529, #dd2a7b, #8134af); }
+.post .pbody { min-width: 0; }
+.post textarea.input { min-height: 70px; }
+@media (max-width: 640px) { .posts { grid-template-columns: 1fr; } .post { grid-template-columns: 80px 1fr; } .post .pthumb { width: 80px; } }

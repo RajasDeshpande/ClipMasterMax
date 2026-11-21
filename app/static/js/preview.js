@@ -284,6 +284,7 @@ export class Preview {
       ctx.fillRect(0, H - bh, W * Math.min(1, to / olen), bh);
     }
     if (s.captions?.enabled !== false) this.drawCaptions(t);
+    this.drawPops(t);
     this.drawHook(to); this.drawMark();
     if (eff.fade) {
       const len = olen, t2 = to;
@@ -449,6 +450,40 @@ export class Preview {
       ctx.fillStyle = eff.hook_color || "#fff"; ctx.textAlign = "center"; ctx.fillText(ln, this.W / 2, y);
     });
     ctx.restore();
+  }
+
+  // Text pop-ups (mirrors the "Pop" style in captions.py)
+  drawPops(t) {
+    const pops = [...(this.settings.effects?.text_pops || [])].filter(p => String(p.text || "").trim()).sort((a, b) => (+a.t || 0) - (+b.t || 0));
+    if (!pops.length) return;
+    const { ctx } = this, k1 = this.W / 1080, tilts = [-4, 3, -2, 4, -3];
+    // same row assignment as captions.py pop_lanes(): overlapping pop-ups get their own row
+    const ROWS = [0.36, 0.47, 0.25], ends = [-1, -1, -1];
+    const lanes = pops.map(p => {
+      const t0 = +p.t || 0, d = Math.max(0.5, +p.dur || 1.8);
+      let lane = ends.findIndex(e => e <= t0);
+      if (lane < 0) lane = ends.indexOf(Math.min(...ends));
+      ends[lane] = t0 + d; return lane;
+    });
+    pops.forEach((p, i) => {
+      const t0 = +p.t, d = Math.max(0.5, +p.dur || 1.8), el = t - t0;
+      if (!(el >= 0 && el < d) || !String(p.text || "").trim()) return;
+      const sc = el < 0.13 ? 0.3 + 0.88 * el / 0.13 : el < 0.23 ? 1.18 - 0.18 * (el - 0.13) / 0.1 : 1;
+      const al = el > d - 0.2 ? Math.max(0, (d - el) / 0.2) : 1;
+      let size = 112 * k1; const cx = this.W / 2, cy = this.H * (+p.y || ROWS[lanes[i]]);
+      // same auto-shrink rule as the export (captions.py): long pop-ups must fit the frame width
+      const estW = String(p.text).trim().length * size * 0.66;
+      size *= Math.min(1, (this.W * 0.88) / Math.max(1, estW));
+      ctx.save();
+      ctx.globalAlpha = al;
+      ctx.translate(cx, cy); ctx.rotate(-tilts[i % 5] * Math.PI / 180); ctx.scale(sc, sc);
+      ctx.font = `${size}px ${cssFont("poppins_black")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+      if ("letterSpacing" in ctx) ctx.letterSpacing = "1px";
+      ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillText(p.text, 5 * k1, 5 * k1);
+      ctx.lineWidth = 18 * k1; ctx.strokeStyle = "#000"; ctx.strokeText(p.text, 0, 0);
+      ctx.fillStyle = p.color || "#FFE500"; ctx.fillText(p.text, 0, 0);
+      ctx.restore();
+    });
   }
 
   drawMark() {

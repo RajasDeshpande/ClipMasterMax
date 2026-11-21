@@ -130,6 +130,26 @@ def _anim_tags(anim: str, x: int, y: int) -> str:
     return ""
 
 
+POP_ROWS = (0.36, 0.47, 0.25)  # vertical rows for pop-ups that are on screen at the same time
+
+
+def pop_lanes(pops: list[dict]) -> list[int]:
+    """Give each pop-up a row so pop-ups that overlap in time don't draw on top of each other.
+    (Mirrored in static/js/preview.js -> popLanes.)"""
+    ends = [-1.0] * len(POP_ROWS)
+    out = []
+    for p in pops:
+        try:
+            t0 = float(p.get("t", 0))
+        except (TypeError, ValueError):
+            t0 = 0.0
+        d = max(0.5, float(p.get("dur", 1.8) or 1.8))
+        lane = next((i for i, e in enumerate(ends) if e <= t0), min(range(len(ends)), key=lambda i: ends[i]))
+        ends[lane] = t0 + d
+        out.append(lane)
+    return out
+
+
 def build_ass(words: list[dict], settings: dict, W: int, H: int, clip_len: float) -> str:
     style = settings["style"]
     eff = settings.get("effects", {})
@@ -195,6 +215,39 @@ def build_ass(words: list[dict], settings: dict, W: int, H: int, clip_len: float
         htext = r"\N".join(" ".join(toks[i] for i in g) for g in groups)
         lines.append(f"Dialogue: 2,{ts(0)},{ts(min(hdur, clip_len))},Hook,,0,0,0,,"
                      f"{{\\an5\\pos({cx},{hy}){hf}\\fscx60\\fscy60\\t(0,140,\\fscx100\\fscy100)}}{esc(htext)}")
+
+    # ---- text pop-ups (manual + detected from the game screen)
+    pops = sorted((p for p in (eff.get("text_pops") or []) if str(p.get("text", "")).strip()),
+                  key=lambda p: float(p.get("t", 0) or 0))
+    if pops:
+        pop_size = int(round(112 * scale))
+        lines.insert(lines.index("[Events]") - 1,
+                     f"Style: Pop,Poppins Black,{pop_size},{ass_color('#FFE500')},{ass_color('#FFFFFF')},{ass_color('#000000')},"
+                     f"{ass_color('#000000', 0.6)},0,0,0,0,100,100,1,0,1,{max(4, 9 * scale):.1f},{max(2, 5 * scale):.1f},5,40,40,20,1")
+        lanes = pop_lanes(pops)
+        for i, p in enumerate(pops):
+            try:
+                t0 = float(p["t"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not (0 <= t0 < clip_len):
+                continue
+            try:
+                d = max(0.5, float(p.get("dur") or 1.8))
+                py = int(H * float(p.get("y") or POP_ROWS[lanes[i]]))
+            except (TypeError, ValueError):
+                d, py = 1.8, int(H * POP_ROWS[lanes[i]])
+            tilt = (-4, 3, -2, 4, -3)[i % 5]
+            col = p.get("color") or "#FFE500"
+            ptxt = esc(str(p["text"]).strip())
+            pf = r"\fnPoppins Black" if DEVA.search(ptxt) else ""
+            # shrink long pop-ups so they never run off the sides (Poppins Black ≈ 0.66 em per char)
+            est_w = len(str(p["text"]).strip()) * pop_size * 0.66
+            fs = int(pop_size * min(1.0, (W * 0.88) / max(1.0, est_w)))
+            lines.append(
+                f"Dialogue: 3,{ts(t0)},{ts(min(clip_len, t0 + d))},Pop,,0,0,0,,"
+                f"{{\\an5\\pos({cx},{py}){pf}\\fs{fs}\\c{ass_inline(col)}\\frz{tilt}\\fscx30\\fscy30"
+                f"\\t(0,130,\\fscx118\\fscy118)\\t(130,230,\\fscx100\\fscy100)\\fad(0,200)}}{ptxt}")
 
     # ---- watermark
     wm = (eff.get("watermark") or "").strip()

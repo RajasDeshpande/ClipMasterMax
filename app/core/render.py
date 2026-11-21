@@ -187,6 +187,15 @@ def apply_cuts(proj: dict, clip: dict) -> tuple[dict, list[tuple[float, float]],
         if t is not None:
             marks.append({**m, "t": round(t, 3)})
     eff["sfx_marks"] = marks
+    pops = []
+    for p in eff.get("text_pops") or []:
+        try:
+            t = to_out(float(p.get("t")), keep)
+        except (TypeError, ValueError):
+            t = None
+        if t is not None:
+            pops.append({**p, "t": round(t, 3)})
+    eff["text_pops"] = pops
     st["effects"] = eff
     c2["settings"] = st
     return c2, keep, out_len
@@ -436,7 +445,8 @@ def render_clip(proj: dict, clip: dict, *, on_progress: Callable[[float], None] 
     out_dir.mkdir(parents=True, exist_ok=True)
     base = slug(clip.get("title") or "", f"clip_{clip['id']}")
     aspect_tag = settings["layout"].get("aspect", "9:16").replace(":", "x")
-    out = out_dir / f"{base}_{aspect_tag}.mp4"
+    # clip id in the name: two clips with the same title must never overwrite each other's video
+    out = out_dir / f"{base}_{clip['id'][-5:]}_{aspect_tag}.mp4"
 
     args = ["-ss", f"{clip['start']:.3f}", "-t", f"{src_len:.3f}", "-i", str(src)]
     if music_path:

@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .core import captions, ffmpeg, highlights, ingest, jobs, meta, render, sfx, storage, store, transcribe, youtube
+from .core import (captions, ffmpeg, gametext, highlights, ingest, instagram, jobs, meta, pipeline, publisher, render,
+                   sfx, storage, store, transcribe, youtube)
 from .core.config import DATA_DIR, FONTS_DIR, MUSIC_DIR, STATIC_DIR, YT_CLIENT_SECRET, YTDLP
 from .core.presets import GAMES, public_presets
 
@@ -273,6 +274,8 @@ def patch_clip(pid: str, cid: str, body: dict = Body(...)):
                 eff = c["settings"].get("effects", {})
                 eff["sfx_marks"] = [{**m, "t": round(m["t"] + shift, 3)} for m in eff.get("sfx_marks") or []
                                     if 0 <= m["t"] + shift < en - st]
+                eff["text_pops"] = [{**m, "t": round(m["t"] + shift, 3)} for m in eff.get("text_pops") or []
+                                    if 0 <= m["t"] + shift < en - st]
             c["start"], c["end"] = round(st, 3), round(en, 3)
             c["cuts"] = render.normalize_cuts(c.get("cuts"), c["end"] - c["start"])
         for k in ("title", "words", "meta"):
@@ -310,6 +313,28 @@ def clip_thumb(pid: str, cid: str):
     return FileResponse(f, headers={"Cache-Control": "max-age=600"})
 
 
+def caption_key(cap: dict) -> str:
+    """Which language/script a clip's captions were made in (to know when to redo them)."""
+    lang = cap.get("language", "en")
+    return f"{lang}|{cap.get('hindi_mode', 'devanagari') if lang in ('hi', 'auto') else '-'}"
+
+
+def needs_captions(c: dict, explicit: bool) -> bool:
+    if not c["settings"].get("captions", {}).get("enabled", True):
+        return False
+    if not c.get("words"):
+        return True
+    if not c.get("words_key"):
+        return False   # captions made before language tracking (maybe hand-edited): never overwrite them
+    return explicit and c["words_key"] != caption_key(c["settings"].get("captions", {}))
+
+
+def caption_opts(c: dict) -> dict:
+    # Only force a fresh transcription when replacing existing captions; otherwise allow the fast path
+    # that re-uses a "Deep scan speech" transcript.
+    return {"force": True} if c.get("words") else {}
+
+
 def _transcribe_job(pid: str, cid: str, opts: dict):
     def work(job):
         p = store.get_project(pid)
@@ -337,6 +362,7 @@ def _transcribe_job(pid: str, cid: str, opts: dict):
             cc["language"] = res["language"]
             cc["settings"]["captions"] = {**cc["settings"].get("captions", {}),
                                           **{k: v for k, v in opts.items() if k != "force"}}
+            cc["words_key"] = caption_key(cc["settings"]["captions"])
         store.update_project(pid, fn)
         return {"words": len(res["words"]), "language": res["language"]}
     return work
@@ -356,6 +382,13 @@ def _render_job(pid: str, cid: str):
         c = store.find_clip(p, cid)
         job.progress(1, "Rendering...")
         res = render.render_clip(p, c, on_progress=lambda f: job.progress(2 + f * 97, f"Rendering... {f * 100:.0f}%"))
+        old = (c.get("render") or {})
+        for k in ("file", "srt"):   # this clip's previous render was replaced -> don't leave a stale copy behind
+            if old.get(k) and old[k] != res.get(k) and Path(old[k]).exists():
+                try:
+                    Path(old[k]).unlink()
+                except OSError:
+                    pass
         store.update_project(pid, lambda pp: store.find_clip(pp, cid).update(render=res))
         return res
     return work
@@ -381,8 +414,9 @@ def batch(pid: str, body: dict = Body(...)):
             store.update_project(pid, lambda pp, cid=cid: store.find_clip(pp, cid).update(
                 settings=store.deep_merge(store.find_clip(pp, cid)["settings"], settings_patch)))
         c = store.find_clip(store.get_project(pid), cid)
-        if do_caps and not c.get("words") and c["settings"].get("captions", {}).get("enabled", True):
-            out.append(jobs.submit("transcribe", "ai", _transcribe_job(pid, cid, {}), project=pid, clip=cid,
+        explicit = bool(settings_patch and "captions" in settings_patch)
+        if do_caps and needs_captions(c, explicit):
+            out.append(jobs.submit("transcribe", "ai", _transcribe_job(pid, cid, caption_opts(c)), project=pid, clip=cid,
                                    label="Generating captions"))
             tr_id = out[-1]["id"]
 
@@ -494,6 +528,127 @@ def upload_clip(pid: str, cid: str, body: dict = Body(...)):
     return jobs.submit("upload", "net", work, project=pid, clip=cid, label="Uploading to YouTube")
 
 
+# ------------------------------------------------------------------ posting (YouTube + Instagram queue)
+@app.get("/api/posts")
+def posts_list(project: str | None = None):
+    out = []
+    for p in publisher.list_posts(project):
+        try:
+            pr = store.get_project(p["project"])
+            c = store.find_clip(pr, p["clip"])
+            p = {**p, "clip_title": c.get("title") or (c.get("meta") or {}).get("hook") or "Clip",
+                 "project_name": pr["name"], "rendered": bool(c.get("render")),
+                 "duration": (c.get("render") or {}).get("duration")}
+        except (KeyError, ValueError):
+            p = {**p, "clip_title": "(deleted clip)", "project_name": "", "rendered": False}
+        out.append(p)
+    return out
+
+
+@app.post("/api/posts")
+def posts_create(body: dict = Body(...)):
+    """Queue one clip for one or more platforms. body: project, clip, platforms[], title, description, tags,
+    caption, privacy, when (epoch seconds or null), review (bool)."""
+    p = _proj(body["project"])
+    c = _clip(p, body["clip"])
+    if not c.get("render"):
+        raise HTTPException(400, "Render the clip first")
+    out = []
+    for plat in body.get("platforms") or []:
+        if plat == "youtube" and not youtube.status().get("connected"):
+            raise HTTPException(400, "Connect YouTube in Settings first")
+        if plat == "instagram" and not instagram.status().get("connected"):
+            raise HTTPException(400, "Connect Instagram in Settings first")
+        out.append(publisher.create(p["id"], c["id"], plat, title=body.get("title", ""), description=body.get("description", ""),
+                                    tags=body.get("tags") or [], caption=body.get("caption", ""),
+                                    privacy=body.get("privacy", "public"), when=body.get("when"),
+                                    review=bool(body.get("review", False))))
+    return out
+
+
+@app.patch("/api/posts/{post_id}")
+def posts_edit(post_id: str, body: dict = Body(...)):
+    try:
+        return publisher.edit(post_id, body)
+    except KeyError:
+        raise HTTPException(404, "Post not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/posts/{post_id}/approve")
+def posts_approve(post_id: str, body: dict = Body(default={})):
+    try:
+        return publisher.approve(post_id, body.get("when"), now=bool(body.get("now")))
+    except KeyError:
+        raise HTTPException(404, "Post not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/posts/{post_id}")
+def posts_delete(post_id: str):
+    publisher.delete(post_id)
+    return {"ok": True}
+
+
+@app.get("/api/instagram/status")
+def ig_status():
+    return instagram.status()
+
+
+@app.post("/api/instagram/connect")
+def ig_connect(body: dict = Body(...)):
+    try:
+        return instagram.connect(body.get("token", ""))
+    except instagram.InstagramError as e:
+        raise HTTPException(400, f"Instagram said: {e}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Couldn't reach Instagram: {e}")
+
+
+@app.post("/api/instagram/disconnect")
+def ig_disconnect():
+    instagram.disconnect()
+    return instagram.status()
+
+
+# ------------------------------------------------------------------ game text pop-ups + Auto Pilot
+@app.post("/api/projects/{pid}/clips/{cid}/gametext")
+def detect_game_text(pid: str, cid: str):
+    p = _proj(pid)
+    c = _clip(p, cid)
+
+    def work(job):
+        pops = gametext.detect(store.project_dir(pid) / p["source"]["file"], c["start"], c["end"], p.get("game"),
+                               on_progress=lambda f: job.progress(f * 100, f"Reading game text... {f * 100:.0f}%"))
+
+        def fn(pp):
+            cc = store.find_clip(pp, cid)
+            keep = [x for x in cc["settings"]["effects"].get("text_pops") or [] if x.get("source") != "game"]
+            cc["settings"]["effects"]["text_pops"] = sorted(keep + pops, key=lambda x: x["t"])
+        store.update_project(pid, fn)
+        return {"found": pops}
+    return jobs.submit("gametext", "ai", work, project=pid, clip=cid, label="Reading game text")
+
+
+@app.post("/api/projects/{pid}/autopilot")
+def autopilot(pid: str, body: dict = Body(...)):
+    p = _proj(pid)
+    if p.get("status") != "ready":
+        raise HTTPException(400, "The video is still importing")
+    plats = body.get("platforms") or []
+    if "youtube" in plats and not youtube.status().get("connected"):
+        raise HTTPException(400, "Connect YouTube in Settings first (or untick YouTube)")
+    if "instagram" in plats and not instagram.status().get("connected"):
+        raise HTTPException(400, "Connect Instagram in Settings first (or untick Instagram)")
+
+    def work(job):
+        return pipeline.run(job, pid, body, transcribe_job=_transcribe_job, render_job=_render_job,
+                            needs_captions=needs_captions, caption_opts=caption_opts)
+    return jobs.submit("autopilot", "io", work, project=pid, label="🤖 Auto Pilot")
+
+
 # ------------------------------------------------------------------ sound effects
 @app.get("/api/sfx/{name}")
 def sfx_file(name: str):
@@ -586,6 +741,7 @@ async def all_errors(request, exc):  # noqa: ARG001
 @app.on_event("startup")
 def _warmup():
     """Load the speech model onto the GPU in the background so the first captions are instant."""
+    publisher.start()  # background worker that posts approved / scheduled clips
     size = transcribe.resolve_model("auto")
     if transcribe.model_cached(size):
         jobs.submit("warmup", "ai", lambda job: (transcribe.get_model(size), {"model": size})[1], label="Loading speech AI")

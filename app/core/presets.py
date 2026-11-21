@@ -115,12 +115,12 @@ def default_clip_settings() -> dict:
             "hook_text": "", "hook_duration": 3.0, "hook_position": 0.15,
             "hook_color": "#FFFFFF", "hook_bg": "#E11D48",
             "watermark": "", "bleep": False, "bleep_sound": "beep",
-            "hype_sfx": "none", "sfx_volume": 0.8, "sfx_marks": [],
+            "hype_sfx": "none", "sfx_volume": 0.8, "sfx_marks": [], "text_pops": [],
             "music": None, "music_volume": 0.12, "duck": True,
             "normalize": True, "fade": True,
         },
         "export": {"fps": "source", "quality": "high", "encoder": "auto"},
-        "captions": {"enabled": True, "language": "auto", "hindi_mode": "devanagari", "model": "auto", "hotwords": ""},
+        "captions": {"enabled": True, "language": "en", "hindi_mode": "devanagari", "model": "auto", "hotwords": ""},
     }
 
 
