@@ -201,6 +201,17 @@ def apply_cuts(proj: dict, clip: dict) -> tuple[dict, list[tuple[float, float]],
     return c2, keep, out_len
 
 
+# Facecam size: max zoom for the webcam before we stop enlarging it (bigger zoom = blurrier)
+CAM_FIT = {"sharp": 2.4, "big": 3.0, "fill": 99.0}
+
+
+def _cas(ratio: float) -> str:
+    """Contrast-adaptive sharpening (cleaner than unsharp on faces), stronger for bigger enlargements."""
+    if ratio <= 1.1:
+        return ""
+    return f"cas={min(0.9, 0.35 + 0.15 * (ratio - 1)):.2f},"
+
+
 def _sharpen(ratio: float) -> str:
     """Sharpening that grows with how much a region is enlarged (zoomed facecam / gameplay looks soft otherwise)."""
     if ratio <= 1.12:
@@ -273,9 +284,24 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
         fx, fyc, fw, fh = (float(fc.get(k, d)) for k, d in (("x", 0), ("y", 0), ("w", .3), ("h", .3)))
         cw, chh = _even(max(16, sw * fw)), _even(max(16, sh * fh))
         f.append(f"{head},split=2[cam_s][game_s]")
-        cam_up = max(W / cw, Hc / chh)   # how much the webcam is enlarged (often 2-3x)
-        f.append(f"[cam_s]crop={cw}:{chh}:{sw * fx:.0f}:{sh * fyc:.0f},scale={W}:{Hc}:force_original_aspect_ratio=increase"
-                 f":flags=lanczos{_sharpen(cam_up)},eq=contrast=1.03:saturation=1.07,crop={W}:{Hc}[cam]")
+        crop_cam = f"crop={cw}:{chh}:{sw * fx:.0f}:{sh * fyc:.0f}"
+        fill_up = max(W / cw, Hc / chh)              # zoom needed to fill the whole top strip
+        cap = CAM_FIT.get(lay.get("cam_fit", "sharp"), 2.4)
+        # clean compression noise first (a 3-4x blow-up makes it look like mush), then sharpen with CAS
+        clean = "hqdn3d=1.5:1.5:4:4,"
+        if fill_up <= cap:
+            f.append(f"[cam_s]{crop_cam},{clean}scale={W}:{Hc}:force_original_aspect_ratio=increase:flags=lanczos,"
+                     f"{_cas(fill_up)}eq=contrast=1.03:saturation=1.07,crop={W}:{Hc}[cam]")
+        else:
+            # small webcam: enlarge it only `cap` times (stays sharp), centred on a blurred copy of itself
+            tw, th = min(W, _even(cw * cap)), min(Hc, _even(chh * cap))
+            bw_, bh_ = _even(W / 8), _even(Hc / 8)
+            f.append(f"[cam_s]{crop_cam},split=2[cam_bg_s][cam_fg_s]")
+            f.append(f"[cam_bg_s]scale={bw_}:{bh_}:force_original_aspect_ratio=increase,crop={bw_}:{bh_},gblur=sigma=6,"
+                     f"eq=brightness=-0.08:saturation=1.1,scale={W}:{Hc}[cam_bg]")
+            f.append(f"[cam_fg_s]{clean}scale={_even(cw * cap)}:{_even(chh * cap)}:flags=lanczos,{_cas(cap)}"
+                     f"eq=contrast=1.03:saturation=1.07,crop={tw}:{th}[cam_fg]")
+            f.append("[cam_bg][cam_fg]overlay=x=(W-w)/2:y=(H-h)/2[cam]")
         sc = max(W / sw, Hg / sh) * zoom
         sw2, sh2 = _even(sw * sc), _even(sh * sc)
         f.append(f"[game_s]scale={sw2}:{sh2}:flags=lanczos{_sharpen(sc)},crop={W}:{Hg}:{(sw2 - W) * cx:.0f}:{(sh2 - Hg) * 0.5:.0f}[game]")

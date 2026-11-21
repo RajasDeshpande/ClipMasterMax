@@ -868,6 +868,10 @@ async function viewEditor(pid, cid) {
             <div>${F.range("layout.facecam.w", "Cam width", 0.05, 1, 0.005, "%")}</div><div>${F.range("layout.facecam.h", "Cam height", 0.05, 1, 0.005, "%")}</div>
             <div>${F.range("layout.cam_ratio", "Cam share of screen", 0.2, 0.6, 0.01, "%")}</div>
           </div>
+          <label class="f">Facecam size</label>${F.seg("layout.cam_fit", [["sharp", "✨ Sharp (recommended)"], ["big", "Bigger"], ["fill", "Fill width"]])}
+          <div class="muted small" id="camFitInfo" style="margin-top:6px"></div>
+          <div>
+          </div>
         </div>
         <div class="note" style="margin-top:14px">💡 For GTA-style gameplay, <b>Blur fill</b> with zoom ~1.3–1.6 looks great on Shorts. <b>Crop to fill</b> + horizontal focus works best when the action is centred.</div>
       </div></section>
@@ -1174,6 +1178,18 @@ async function viewEditor(pid, cid) {
     $$("[data-seg]").forEach(el => { const val = String(getPath(st, el.dataset.seg)); $$("button[data-val]", el).forEach(b => b.classList.toggle("on", b.dataset.val === val)); });
     updSfxInfo();
     $("#camBox").classList.toggle("hidden", st.layout.mode !== "facecam");
+    if (st.layout.mode === "facecam") {
+      // tell the user how small their webcam really is and how much each option enlarges it
+      const fc = st.layout.facecam || { w: .3, h: .3 }, sw = P.source.width, sh = P.source.height;
+      const [W, H] = ASPECTS[st.layout.aspect || "9:16"] || [1080, 1920];
+      const Hc = Math.round(H * Math.min(.6, Math.max(.2, +st.layout.cam_ratio || .38)));
+      const cw = Math.round(sw * fc.w), ch = Math.round(sh * fc.h), fill = Math.max(W / cw, Hc / ch);
+      const cap = { sharp: 2.4, big: 3, fill: 99 }[st.layout.cam_fit || "sharp"];
+      const used = Math.min(fill, cap);
+      $("#camFitInfo").innerHTML = `Your webcam is <b>${cw}×${ch}px</b> in the recording. Filling the width needs <b>${fill.toFixed(1)}×</b> zoom` +
+        (fill > 2.4 ? ` — that's why it looks blurry. Now using <b>${used.toFixed(1)}×</b>${used < fill ? " (sharp, centred on a blurred background)" : ""}.` : " — fine, it stays sharp.") +
+        (fill > 3 ? ` 💡 For a bigger <i>and</i> sharp cam, make the webcam larger in your OBS scene.` : "");
+    }
     $("#fgY").classList.toggle("hidden", !["blur", "fit"].includes(st.layout.mode));
     $$(".preset").forEach(p => p.classList.toggle("on", p.dataset.p === st.style.preset));
   }
@@ -1197,6 +1213,7 @@ async function viewEditor(pid, cid) {
   });
   if (!st.layout.facecam) st.layout.facecam = { x: 0.0, y: 0.0, w: 0.28, h: 0.3 };
   if (st.layout.cam_ratio == null) st.layout.cam_ratio = 0.38;
+  if (!st.layout.cam_fit) st.layout.cam_fit = "sharp";
 
   // presets grid
   $("#presets").innerHTML = Object.entries(pres.captions).map(([k, p]) => {

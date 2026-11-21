@@ -108,7 +108,7 @@ BAD_WORDS = {
 def default_clip_settings() -> dict:
     return {
         "style": copy.deepcopy(CAPTION_PRESETS["beast"]["style"]),
-        "layout": {"aspect": "9:16", "mode": "blur", "zoom": 1.0, "crop_x": 0.5, "fg_y": 0.45},
+        "layout": {"aspect": "9:16", "mode": "blur", "zoom": 1.0, "crop_x": 0.5, "fg_y": 0.45, "cam_fit": "sharp"},
         "effects": {
             "punch_zoom": True, "punch_strength": 0.10,
             "progress_bar": False, "bar_color": "#FFE500",

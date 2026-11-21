@@ -319,9 +319,26 @@ export class Preview {
       const fc = lay.facecam || { x: 0, y: 0, w: .3, h: .3 };
       const Hc = Math.round(H * Math.min(.6, Math.max(.2, +lay.cam_ratio || .38)) / 2) * 2, Hg = H - Hc;
       const csw = sw * fc.w, csh = sh * fc.h, sc = Math.max(W / csw, Hc / csh);
-      const w2 = csw * sc, h2 = csh * sc;
+      // same rule as render.py: zoom is measured on the ORIGINAL recording; small webcams aren't
+      // stretched past the "Facecam size" limit, they sit centred on a blurred copy instead
+      const CAP = { sharp: 2.4, big: 3.0, fill: 99 }[lay.cam_fit || "sharp"] ?? 2.4;
+      const srcW = this.src?.width || sw, srcH = this.src?.height || sh;
+      const fillUp = Math.max(W / (srcW * fc.w), Hc / (srcH * fc.h));
       ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, Hc); ctx.clip();
-      ctx.drawImage(v, sw * fc.x, sh * fc.y, csw, csh, (W - w2) / 2, (Hc - h2) / 2, w2, h2); ctx.restore();
+      if (fillUp <= CAP) {
+        const w2 = csw * sc, h2 = csh * sc;
+        ctx.drawImage(v, sw * fc.x, sh * fc.y, csw, csh, (W - w2) / 2, (Hc - h2) / 2, w2, h2);
+      } else {
+        const w2 = csw * sc, h2 = csh * sc;
+        ctx.filter = `blur(${Math.round(W / 40)}px) brightness(0.86) saturate(1.1)`;
+        ctx.drawImage(v, sw * fc.x, sh * fc.y, csw, csh, (W - w2) / 2, (Hc - h2) / 2, w2, h2);
+        ctx.filter = "none";
+        const k = CAP / fillUp * sc;           // CAP-times the original size, in preview pixels
+        const fw2 = Math.min(W, csw * k), fh2 = Math.min(Hc, csh * k);
+        const sx = sw * fc.x + (csw * k - fw2) / 2 / k, sy = sh * fc.y + (csh * k - fh2) / 2 / k;
+        ctx.drawImage(v, sx, sy, fw2 / k, fh2 / k, (W - fw2) / 2, (Hc - fh2) / 2, fw2, fh2);
+      }
+      ctx.restore();
       cover(W, Hg, zoom, cx, 0, Hc); return;
     }
     // blur
