@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import time
 
-from . import gametext, ingest, jobs, meta, publisher, store
+from . import facecam, gametext, ingest, jobs, meta, publisher, store
 from .presets import CAPTION_PRESETS
 
 LANG = {  # UI choice -> (language, hindi_mode)
@@ -50,6 +50,21 @@ def run(job: jobs.Job, pid: str, opts: dict, *, transcribe_job, render_job, need
 
     patch = caption_patch(opts.get("preset"), opts.get("language"))
     extra = opts.get("effects") or {}
+
+    # Facecam: find the webcam once for the whole video, then use the Facecam + gameplay layout everywhere
+    cam = None
+    if opts.get("facecam") == "auto":
+        job.progress(2, "Looking for your webcam...")
+        try:
+            src = store.project_dir(pid) / proj["source"]["file"]
+            aspect = proj["source"]["width"] / max(1, proj["source"]["height"])
+            cam = facecam.detect(src, 0.0, proj["source"]["duration"], aspect=aspect)
+            store.update_project(pid, lambda pp: pp.update(facecam=cam))
+        except Exception as e:  # noqa: BLE001 — optional step
+            cam = {"found": False, "reason": str(e)[:120]}
+        if cam.get("found"):
+            src_info = proj["source"]
+            patch = store.deep_merge(patch, {"layout": facecam.layout_for(cam, src_info["width"], src_info["height"])})
     platforms = [p for p in opts.get("platforms") or [] if p in publisher.PLATFORMS]
     review = bool(opts.get("review", True))
     every_h = float(opts.get("every_hours") or 0)
@@ -106,4 +121,5 @@ def run(job: jobs.Job, pid: str, opts: dict, *, transcribe_job, render_job, need
                 caption=m["ig_caption"], privacy=opts.get("privacy", "public"), when=when, review=review))
         made.append(cid)
     job.progress(99, "Done")
-    return {"clips": made, "posts": [x["id"] for x in posts], "review": review}
+    return {"clips": made, "posts": [x["id"] for x in posts], "review": review,
+            "facecam": None if cam is None else bool(cam.get("found"))}

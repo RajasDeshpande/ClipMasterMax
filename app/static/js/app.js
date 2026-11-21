@@ -217,6 +217,7 @@ async function openAutopilot(P, onDone) {
     </div>
     <label class="f">Captions</label>${capChoiceHTML("ap")}
     <label class="switch" style="margin-top:6px"><span>💥 Game text pop-ups<div class="muted small">Reads the game screen (WASTED, MISSION PASSED, VICTORY…) and pops it up big</div></span><input type="checkbox" id="apGame" checked></label>
+    <label class="switch"><span>🎥 Facecam layout<div class="muted small">Finds your webcam automatically and puts it on top, gameplay below. No webcam? Layout stays normal.</div></span><input type="checkbox" id="apCam" checked></label>
     <label class="switch"><span>📈 Progress bar + punch zoom</span><input type="checkbox" id="apFx" checked></label>
     <div class="sep"></div>
     <h3>Post to</h3>
@@ -240,7 +241,7 @@ async function openAutopilot(P, onDone) {
     const spread = $("#apWhen", m).value === "spread";
     const body = {
       count: +$("#apCount", m).value, length: +$("#apLen", m).value, preset: cp.preset, language: cp.lang,
-      game_text: $("#apGame", m).checked, platforms, review: $("#apReview", m).checked, privacy: "public",
+      game_text: $("#apGame", m).checked, facecam: $("#apCam", m).checked ? "auto" : "off", platforms, review: $("#apReview", m).checked, privacy: "public",
       every_hours: spread ? +$("#apEvery", m).value : 0,
       start_at: spread ? Math.floor(new Date($("#apStart", m).value).getTime() / 1000) : 0,
       effects: $("#apFx", m).checked ? { progress_bar: true, punch_zoom: true } : {},
@@ -253,6 +254,7 @@ async function openAutopilot(P, onDone) {
         onDone?.();
         if (jj.status === "done") {
           const r = jj.result;
+          if (r.facecam === true) setTimeout(() => toast("🎥 Webcam found: clips use the Facecam + gameplay layout"), 3500);
           toast(r.posts.length ? (r.review ? `✅ ${r.clips.length} clips ready — review them in 📤 Posts` : `✅ ${r.clips.length} clips made, posting now`) : `✅ ${r.clips.length} clips made`);
           if (r.posts.length) location.hash = "#/posts";
         }
@@ -819,6 +821,7 @@ async function viewEditor(pid, cid) {
         <h3>Format</h3>
         <label class="f">Aspect ratio</label>${F.seg("layout.aspect", [["9:16", "9:16 Shorts/Reels/TikTok"], ["1:1", "1:1 Square"], ["4:5", "4:5 Insta feed"], ["16:9", "16:9 YouTube"]])}
         <label class="f">Framing</label>${F.seg("layout.mode", [["blur", "Blur fill"], ["crop", "Crop to fill"], ["fit", "Fit (black bars)"], ["facecam", "Facecam + gameplay"]])}
+        <div class="row wrap" style="margin-top:8px"><button class="btn sm primary" id="camDetect" title="Finds your webcam overlay in this clip and switches to the Facecam + gameplay layout">🔍 Auto-detect facecam</button><span class="muted small grow" id="camInfo"></span></div>
         <div class="grid2">
           <div>${F.range("layout.zoom", "Gameplay zoom", 0.6, 3.2, 0.01, "x")}</div>
           <div>${F.range("layout.crop_x", "Horizontal focus (left ↔ right)", 0, 1, 0.01, "%")}</div>
@@ -1242,6 +1245,27 @@ async function viewEditor(pid, cid) {
     if (d.mclear != null && confirm("Remove all placed sounds from this clip?")) { st.effects.sfx_marks = []; changed("effects.sfx_marks"); renderMarks(); }
   };
   renderMarks();
+
+  // ------------------------------------------------ facecam auto-detect
+  $("#camDetect").onclick = async () => {
+    const b = $("#camDetect"); b.disabled = true; b.innerHTML = '<span class="spin"></span> Looking for your webcam…';
+    await api("PATCH", `/api/projects/${pid}/clips/${cid}`, { settings: st }).catch(() => {});
+    try {
+      const j = await api("POST", `/api/projects/${pid}/facecam`, { clip: cid, apply: true });
+      Jobs.add(j, jj => {
+        if (!document.body.contains(b)) return;      // moved to another clip meanwhile
+        b.disabled = false; b.textContent = "🔍 Auto-detect facecam";
+        if (jj.status !== "done") return;
+        const r = jj.result;
+        if (!r.found) { $("#camInfo").textContent = "No webcam found — " + (r.reason || ""); return toast("No webcam overlay found in this clip", true); }
+        Object.assign(st.layout, r.layout || { mode: "facecam", facecam: { x: r.x, y: r.y, w: r.w, h: r.h } });
+        if (st.layout.cam_ratio == null) st.layout.cam_ratio = 0.38;
+        changed("layout.mode"); pv.resize();
+        $("#camInfo").textContent = `Webcam found (${Math.round(r.confidence * 100)}% sure). Fine-tune with the sliders below if needed.`;
+        toast("🎥 Webcam found: Facecam + gameplay layout on");
+      });
+    } catch (e) { fail(e); b.disabled = false; b.textContent = "🔍 Auto-detect facecam"; }
+  };
 
   // ------------------------------------------------ text pop-ups
   if (!Array.isArray(st.effects.text_pops)) st.effects.text_pops = [];

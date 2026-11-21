@@ -9,6 +9,7 @@ google-auth-oauthlib>=1.2
 requests>=2.31
 rapidocr>=3.0
 onnxruntime>=1.17
+opencv-python-headless>=4.10
 # NVIDIA GPU speech-AI runtime (harmless on PCs without an NVIDIA GPU)
 nvidia-cublas-cu12; sys_platform != "darwin"
 nvidia-cudnn-cu12==9.*; sys_platform != "darwin"

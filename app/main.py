@@ -15,8 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .core import (captions, ffmpeg, gametext, highlights, ingest, instagram, jobs, meta, pipeline, publisher, render,
-                   sfx, storage, store, transcribe, youtube)
+from .core import (captions, facecam, ffmpeg, gametext, highlights, ingest, instagram, jobs, meta, pipeline, publisher,
+                   render, sfx, storage, store, transcribe, youtube)
 from .core.config import DATA_DIR, FONTS_DIR, MUSIC_DIR, STATIC_DIR, YT_CLIENT_SECRET, YTDLP
 from .core.presets import GAMES, public_presets
 
@@ -630,6 +630,32 @@ def detect_game_text(pid: str, cid: str):
         store.update_project(pid, fn)
         return {"found": pops}
     return jobs.submit("gametext", "ai", work, project=pid, clip=cid, label="Reading game text")
+
+
+@app.post("/api/projects/{pid}/facecam")
+def detect_facecam(pid: str, body: dict = Body(default={})):
+    """Find the webcam overlay. With `clip`, looks only inside that clip and (if `apply`) switches it to the
+    Facecam + gameplay layout."""
+    p = _proj(pid)
+    cid = body.get("clip")
+    c = _clip(p, cid) if cid else None
+
+    def work(job):
+        src = store.project_dir(pid) / p["source"]["file"]
+        s, e = (c["start"], c["end"]) if c else (0.0, p["source"]["duration"])
+        aspect = p["source"]["width"] / max(1, p["source"]["height"])
+        res = facecam.detect(src, s, e, aspect=aspect, on_progress=lambda f: job.progress(f * 100, "Looking for your webcam..."))
+        if not c:
+            store.update_project(pid, lambda pp: pp.update(facecam=res))
+        if c and res.get("found") and body.get("apply", True):
+            def fn(pp):
+                lay = store.find_clip(pp, cid)["settings"]["layout"]
+                lay.update(facecam.layout_for(res, p["source"]["width"], p["source"]["height"],
+                                              aspect=lay.get("aspect", "9:16"), cam_ratio=lay.get("cam_ratio") or 0.38))
+            store.update_project(pid, fn)
+            res = {**res, "layout": store.find_clip(store.get_project(pid), cid)["settings"]["layout"]}
+        return res
+    return jobs.submit("facecam", "io", work, project=pid, clip=cid, label="Detecting facecam")
 
 
 @app.post("/api/projects/{pid}/autopilot")
