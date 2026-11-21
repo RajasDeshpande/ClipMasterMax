@@ -42,8 +42,8 @@ def run(job: jobs.Job, pid: str, opts: dict, *, transcribe_job, render_job, need
         ids = list(opts["clips"])
     else:
         job.progress(1, "Finding the best moments...")
-        new = ingest.suggest_and_store(pid, length=float(opts.get("length", 30)), count=int(opts.get("count", 5)),
-                                       replace_auto=True)
+        asked = max(1, min(50, int(opts.get("count") or 5)))
+        new = ingest.suggest_and_store(pid, length=float(opts.get("length", 30)), count=asked, replace_auto=True)
         ids = [c["id"] for c in new]
     if not ids:
         raise RuntimeError("No clips found in this video.")
@@ -122,4 +122,5 @@ def run(job: jobs.Job, pid: str, opts: dict, *, transcribe_job, render_job, need
         made.append(cid)
     job.progress(99, "Done")
     return {"clips": made, "posts": [x["id"] for x in posts], "review": review,
+            "asked": len(opts["clips"]) if opts.get("clips") else max(1, min(50, int(opts.get("count") or 5))),
             "facecam": None if cam is None else bool(cam.get("found"))}

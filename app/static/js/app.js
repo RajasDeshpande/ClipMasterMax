@@ -204,6 +204,7 @@ function bindCapChoice(id) {
 }
 
 // ============================================================ AUTO PILOT
+function apLastCount() { try { return Math.max(1, Math.min(50, +localStorage.getItem("cm_ap_count") || 5)); } catch { return 5; } }
 async function openAutopilot(P, onDone) {
   const [yt, ig] = await Promise.all([api("GET", "/api/youtube/status").catch(() => ({})), api("GET", "/api/instagram/status").catch(() => ({}))]);
   const now = new Date(Date.now() + 15 * 60000); now.setSeconds(0, 0);
@@ -212,7 +213,14 @@ async function openAutopilot(P, onDone) {
     <h2>🤖 Auto Pilot</h2>
     <p class="muted small">Finds the best moments, captions them, adds game pop-ups, renders, writes titles &amp; hashtags, and posts. Sit back 😎</p>
     <div class="grid2">
-      <div><label class="f">How many clips</label><select class="input" id="apCount">${[3, 5, 8, 10].map(n => `<option ${n === 5 ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+      <div><label class="f">How many clips</label>
+        <div class="row" style="gap:6px">
+          <button class="btn sm" data-apstep="-1" title="Fewer">−</button>
+          <input class="input" type="number" id="apCount" min="1" max="50" step="1" value="${apLastCount()}" style="width:80px;text-align:center">
+          <button class="btn sm" data-apstep="1" title="More">＋</button>
+          ${[3, 5, 10, 20].map(n => `<button class="btn xs" data-apcount="${n}">${n}</button>`).join("")}
+        </div>
+        <div class="muted small" id="apCountHint" style="margin-top:4px"></div></div>
       <div><label class="f">Clip length</label><select class="input" id="apLen">${[[15, "15s"], [20, "20s"], [30, "30s"], [45, "45s"], [59, "59s"], [90, "90s"]].map(([s, l]) => `<option value="${s}" ${s === 30 ? "selected" : ""}>${l}</option>`).join("")}</select></div>
     </div>
     <label class="f">Captions</label>${capChoiceHTML("ap")}
@@ -232,6 +240,27 @@ async function openAutopilot(P, onDone) {
     <div id="apStartBox" class="hidden"><label class="f">First post at</label><input class="input" type="datetime-local" id="apStart" value="${local}"></div>
     <div class="row" style="margin-top:16px"><button class="btn primary big grow" id="apGo">🚀 Start Auto Pilot</button></div>`);
   bindCapChoice("ap");
+  // ---- clip count: free number + quick picks + how many fit in this video
+  const dur = P.source?.duration || 0;
+  const updCount = () => {
+    const inp = $("#apCount", m);
+    let n = Math.round(+inp.value || 1); n = Math.max(1, Math.min(50, n)); inp.value = n;
+    const len = +$("#apLen", m).value, fit = Math.max(1, Math.floor(dur / len));
+    $("#apCountHint", m).textContent = n > fit
+      ? `⚠️ This ${fmt(dur, 0)} video fits about ${fit} non-overlapping ${len}s clip${fit > 1 ? "s" : ""} — you'll get up to ${fit}.`
+      : `Up to ~${fit} clips fit in this ${fmt(dur, 0)} video at ${len}s each.`;
+    try { localStorage.setItem("cm_ap_count", n); } catch {}
+  };
+  m.addEventListener("click", e => {
+    const s = e.target.closest("[data-apstep]"), q = e.target.closest("[data-apcount]");
+    if (s) $("#apCount", m).value = (+$("#apCount", m).value || 0) + +s.dataset.apstep;
+    if (q) $("#apCount", m).value = q.dataset.apcount;
+    if (s || q) updCount();
+  });
+  $("#apCount", m).oninput = () => { if ($("#apCount", m).value !== "") updCount(); };
+  $("#apCount", m).onchange = updCount;
+  $("#apLen", m).addEventListener("change", updCount);
+  updCount();
   $("#apSettings", m)?.addEventListener("click", e => { e.preventDefault(); closeModal(); openSettings(); });
   $("#apWhen", m).onchange = e => { const s = e.target.value === "spread"; $("#apSpread", m).classList.toggle("hidden", !s); $("#apStartBox", m).classList.toggle("hidden", !s); };
   $("#apGo", m).onclick = async () => {
@@ -255,7 +284,8 @@ async function openAutopilot(P, onDone) {
         if (jj.status === "done") {
           const r = jj.result;
           if (r.facecam === true) setTimeout(() => toast("🎥 Webcam found: clips use the Facecam + gameplay layout"), 3500);
-          toast(r.posts.length ? (r.review ? `✅ ${r.clips.length} clips ready — review them in 📤 Posts` : `✅ ${r.clips.length} clips made, posting now`) : `✅ ${r.clips.length} clips made`);
+          const short = r.asked && r.clips.length < r.asked ? ` (you asked for ${r.asked} — this video only had ${r.clips.length} good moment${r.clips.length === 1 ? "" : "s"})` : "";
+          toast((r.posts.length ? (r.review ? `✅ ${r.clips.length} clips ready — review them in 📤 Posts` : `✅ ${r.clips.length} clips made, posting now`) : `✅ ${r.clips.length} clips made`) + short);
           if (r.posts.length) location.hash = "#/posts";
         }
       });
