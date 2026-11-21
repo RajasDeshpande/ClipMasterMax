@@ -21,18 +21,22 @@ def _set_status(pid: str, status: str, msg: str = "") -> None:
     store.update_project(pid, fn)
 
 
-def download_url(job: Job, pid: str, url: str) -> Path:
+QUALITY = {"best": 2160, "1440": 1440, "1080": 1080, "720": 720}
+
+
+def download_url(job: Job, pid: str, url: str, quality: str = "best") -> Path:
     if not YTDLP:
         raise RuntimeError("yt-dlp is not installed. Run setup again (pip install yt-dlp).")
     out_dir = store.project_dir(pid)
     tmpl = str(out_dir / "source.%(ext)s")
-    # Prefer H.264 MP4 so it previews in the browser and edits fast; fall back to best available.
-    fmt = ("bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/"
-           "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b")
+    cap = QUALITY.get(str(quality), 2160)
+    # Highest resolution (up to the cap) and frame rate first; H.264/AAC only as a tie-breaker.
+    # (Forcing H.264 used to cap YouTube downloads at 1080p — 1440p/4K only exist as VP9/AV1.)
+    sort = f"res:{cap},fps,vcodec:h264,acodec:aac"
     js = []
     if not shutil.which("deno") and shutil.which("node"):
         js = ["--js-runtimes", "node"]  # YouTube needs a JS runtime for full format access
-    cmd = [YTDLP, *js, "-f", fmt, "--merge-output-format", "mp4", "--no-playlist", "--newline",
+    cmd = [YTDLP, *js, "-S", sort, "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--no-playlist", "--newline",
            "--no-part", "-o", tmpl, "--print", "after_move:filepath", "--print", "before_dl:title", url]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace",
@@ -74,17 +78,31 @@ def prepare(job: Job, pid: str, src: Path, *, base_pct: float = 0.0) -> dict:
     info = ffmpeg.probe(src)
     pdir = store.project_dir(pid)
 
+    # The editor preview plays a browser-friendly copy; exports ALWAYS use the original file.
     preview = src
-    needs_proxy = info["vcodec"] not in BROWSER_SAFE_V or src.suffix.lower() not in (".mp4", ".webm", ".mov", ".m4v")
+    codec_ok = info["vcodec"] in BROWSER_SAFE_V
+    container_ok = src.suffix.lower() in (".mp4", ".webm", ".mov", ".m4v")
+    too_big = info["height"] > 1440          # 4K previews stutter in the browser -> 1080p copy
+    needs_proxy = not (codec_ok and container_ok) or too_big
     if needs_proxy:
-        _set_status(pid, "analyzing", "Making preview copy...")
         preview = pdir / "preview.mp4"
-        venc = ["-c:v", "h264_nvenc", "-preset", "p2", "-cq", "28"] if ffmpeg.nvenc_available() \
-            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
-        ffmpeg.run(["-i", str(src), "-vf", "scale=-2:'min(720,ih)'", *venc, "-c:a", "aac", "-b:a", "128k",
-                    "-movflags", "+faststart", str(preview)],
-                   duration=info["duration"],
-                   on_progress=lambda f: job.progress(base_pct + span * 0.35 * f, f"Making preview copy... {f*100:.0f}%"))
+        prog = lambda f: job.progress(base_pct + span * 0.35 * f, f"Making preview copy... {f*100:.0f}%")  # noqa: E731
+        if codec_ok and not too_big:
+            # e.g. OBS .mkv with H.264: just copy the streams into MP4 — full quality, takes seconds
+            _set_status(pid, "analyzing", "Preparing preview (full quality)...")
+            try:
+                ffmpeg.run(["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                            "-movflags", "+faststart", str(preview)], duration=info["duration"], on_progress=prog)
+            except ffmpeg.FFmpegError:
+                preview.unlink(missing_ok=True)
+                codec_ok = False
+        if not preview.exists():
+            _set_status(pid, "analyzing", "Making preview copy...")
+            venc = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21"] if ffmpeg.nvenc_available() \
+                else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"]
+            ffmpeg.run(["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)':flags=lanczos",
+                        *venc, "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(preview)],
+                       duration=info["duration"], on_progress=prog)
 
     thumb = pdir / "thumb.jpg"
     ffmpeg.extract_frame(src, min(info["duration"] * 0.2, 30), thumb)

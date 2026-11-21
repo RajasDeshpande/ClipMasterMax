@@ -410,7 +410,10 @@ async function viewHome() {
       <input type="file" id="file" accept="video/*,.mkv" hidden>
       <div id="upProg" class="hidden" style="margin-top:10px"><div class="row small"><span class="grow" id="upTxt">Uploading…</span></div><div class="progress"><i id="upBar"></i></div></div>
       <div class="or">or paste a link</div>
-      <div class="row"><input class="input grow" id="url" placeholder="https://youtube.com/watch?v=…  (your own videos / streams)"><button class="btn primary" id="go">Import</button></div>
+      <div class="row"><input class="input grow" id="url" placeholder="https://youtube.com/watch?v=…  (your own videos / streams)">
+        <select class="input" id="urlQ" style="width:auto" title="Download quality — higher = sharper zooms & facecam, bigger download">
+          <option value="best">Best (up to 4K)</option><option value="1440">1440p</option><option value="1080">1080p (smaller)</option><option value="720">720p (fastest)</option>
+        </select><button class="btn primary" id="go">Import</button></div>
       <p class="muted small" style="margin:8px 0 0">Only import videos you own or have permission to re-use. Reuploading other creators' videos gets copyright claims and is not monetizable.</p>
     </div>
   </section>
@@ -426,7 +429,7 @@ async function viewHome() {
   $("#go").onclick = async () => {
     const url = $("#url").value.trim(); if (!url) return toast("Paste a link first", true);
     try {
-      const r = await api("POST", "/api/projects/url", { url, game: $("#game").value });
+      const r = await api("POST", "/api/projects/url", { url, game: $("#game").value, quality: $("#urlQ").value });
       Jobs.add(r.job); location.hash = `#/p/${r.project.id}`;
     } catch (e) { fail(e); }
   };

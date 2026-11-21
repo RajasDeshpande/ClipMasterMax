@@ -160,7 +160,7 @@ def url_project(body: dict = Body(...)):
 
     def work(job):
         try:
-            src = ingest.download_url(job, pid, url)
+            src = ingest.download_url(job, pid, url, quality=str(body.get("quality") or "best"))
             store.update_project(pid, lambda p: p.update(source_url=url))
             return ingest.prepare(job, pid, src, base_pct=60)
         except Exception as e:

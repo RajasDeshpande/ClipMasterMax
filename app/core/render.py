@@ -201,6 +201,14 @@ def apply_cuts(proj: dict, clip: dict) -> tuple[dict, list[tuple[float, float]],
     return c2, keep, out_len
 
 
+def _sharpen(ratio: float) -> str:
+    """Sharpening that grows with how much a region is enlarged (zoomed facecam / gameplay looks soft otherwise)."""
+    if ratio <= 1.12:
+        return ""
+    amount = min(1.1, 0.35 + 0.4 * (ratio - 1))
+    return f",unsharp=5:5:{amount:.2f}:5:5:0"
+
+
 def _between_any(ranges: list[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in ranges) or "0"
 
@@ -253,9 +261,9 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
         # cover the frame, then crop with horizontal offset
         sc = max(W / sw, H / sh) * zoom
         sw2, sh2 = _even(sw * sc), _even(sh * sc)
-        f.append(f"{head},scale={sw2}:{sh2}:flags=lanczos,crop={W}:{H}:{(sw2 - W) * cx:.0f}:{(sh2 - H) * 0.5:.0f}[v0]")
+        f.append(f"{head},scale={sw2}:{sh2}:flags=lanczos{_sharpen(sc)},crop={W}:{H}:{(sw2 - W) * cx:.0f}:{(sh2 - H) * 0.5:.0f}[v0]")
     elif mode == "fit":
-        f.append(f"{head},scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f.append(f"{head},scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos{_sharpen(min(W / sw, H / sh))},"
                  f"pad={W}:{H}:(ow-iw)/2:(oh-ih)*{fy:.3f}:black[v0]")
     elif mode == "facecam":
         fc = lay.get("facecam") or {"x": 0.0, "y": 0.0, "w": 0.3, "h": 0.3}
@@ -265,11 +273,12 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
         fx, fyc, fw, fh = (float(fc.get(k, d)) for k, d in (("x", 0), ("y", 0), ("w", .3), ("h", .3)))
         cw, chh = _even(max(16, sw * fw)), _even(max(16, sh * fh))
         f.append(f"{head},split=2[cam_s][game_s]")
-        f.append(f"[cam_s]crop={cw}:{chh}:{sw * fx:.0f}:{sh * fyc:.0f},scale={W}:{Hc}:force_original_aspect_ratio=increase,"
-                 f"crop={W}:{Hc}[cam]")
+        cam_up = max(W / cw, Hc / chh)   # how much the webcam is enlarged (often 2-3x)
+        f.append(f"[cam_s]crop={cw}:{chh}:{sw * fx:.0f}:{sh * fyc:.0f},scale={W}:{Hc}:force_original_aspect_ratio=increase"
+                 f":flags=lanczos{_sharpen(cam_up)},eq=contrast=1.03:saturation=1.07,crop={W}:{Hc}[cam]")
         sc = max(W / sw, Hg / sh) * zoom
         sw2, sh2 = _even(sw * sc), _even(sh * sc)
-        f.append(f"[game_s]scale={sw2}:{sh2}:flags=lanczos,crop={W}:{Hg}:{(sw2 - W) * cx:.0f}:{(sh2 - Hg) * 0.5:.0f}[game]")
+        f.append(f"[game_s]scale={sw2}:{sh2}:flags=lanczos{_sharpen(sc)},crop={W}:{Hg}:{(sw2 - W) * cx:.0f}:{(sh2 - Hg) * 0.5:.0f}[game]")
         f.append("[cam][game]vstack=inputs=2[v0]")
     else:  # blur
         bw, bh = _even(W / 6), _even(H / 6)
@@ -279,7 +288,7 @@ def build_graph(proj: dict, clip: dict, settings: dict, *, W: int, H: int, fps: 
         f.append(f"[bg_s]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},gblur=sigma=5,"
                  f"eq=brightness=-0.07:saturation=1.2,scale={W}:{H}[bg]")
         crop_w, crop_h = min(fw, W), min(fh, H)
-        f.append(f"[fg_s]scale={fw}:{fh}:flags=lanczos,crop={crop_w}:{crop_h}:{(fw - crop_w) * cx:.0f}:{(fh - crop_h) * 0.5:.0f}[fg]")
+        f.append(f"[fg_s]scale={fw}:{fh}:flags=lanczos{_sharpen(fw / sw)},crop={crop_w}:{crop_h}:{(fw - crop_w) * cx:.0f}:{(fh - crop_h) * 0.5:.0f}[fg]")
         f.append(f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)*{fy:.3f}[v0]")
 
     last = "v0"

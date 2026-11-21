@@ -270,6 +270,7 @@ export class Preview {
     if (!this.settings || !k) return;
     const s = this.settings, lay = s.layout, eff = s.effects;
     const t = Math.max(0, this.v.currentTime - (this.clip?.start || 0));
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";   // sharper zoomed facecam/gameplay
     ctx.save();
     ctx.setTransform(k, 0, 0, k, 0, 0);
     ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
